@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
@@ -21,41 +22,38 @@ import java.util.stream.Collectors;
 public class FileMergerService {
 
     private static final Logger logger = LoggerFactory.getLogger(FileMergerService.class);
+    
+    @Value("${file.paths.finance}")
+    private String financeFilePath;
+    
+    @Value("${file.paths.kyc}")
+    private String kycFilePath;
+
     private final ObjectMapper mapper;
 
     public FileMergerService(ObjectMapper mapper) {
         this.mapper = mapper;
     }
 
-    /**
-     * Merges data from two JSON files based on matching party IDs
-     * @return List of merged entities
-     * @throws IOException if file operations fail
-     * @throws JsonProcessingException if JSON parsing fails
-     * @throws IllegalArgumentException if files are empty or invalid
-     */
     public List<MergedEntity> mergeFiles() throws IOException, JsonProcessingException, IllegalArgumentException {
-        // Load resources
-        Resource file1Resource = new ClassPathResource("FinanceCH_2025-03-11 2.json");
-        Resource file2Resource = new ClassPathResource("kyc.json");
+        // Load resources using injected paths
+        Resource financeFileResource = new ClassPathResource(financeFilePath);
+        Resource kycFileResource = new ClassPathResource(kycFilePath);
         
-        // Verify resources exist
-        verifyResourcesExist(file1Resource, file2Resource);
+        verifyResourcesExist(financeFileResource, kycFileResource);
 
-        // Read and validate file contents
-        String json1 = readFileContent(file1Resource);
-        String json2 = readFileContent(file2Resource);
+        String financeJson = readFileContent(financeFileResource);
+        String kycJson = readFileContent(kycFileResource);
         
-        if (!StringUtils.hasText(json1) || !StringUtils.hasText(json2)) {
+        if (!StringUtils.hasText(financeJson) || !StringUtils.hasText(kycJson)) {
             throw new IllegalArgumentException("One or both files are empty");
         }
 
-        // Parse JSON
-        File1Root file1Root = parseJson(json1, File1Root.class);
-        File2Root file2Root = parseJson(json2, File2Root.class);
+        File1Root financeData = parseJson(financeJson, File1Root.class);
+        File2Root kycData = parseJson(kycJson, File2Root.class);
 
-        logger.info("Successfully parsed both JSON files");
-        return mergeEntities(file1Root, file2Root);
+        logger.info("Successfully parsed files: {} and {}", financeFilePath, kycFilePath);
+        return mergeEntities(financeData, kycData);
     }
 
     private String readFileContent(Resource resource) throws IOException {
@@ -71,38 +69,40 @@ public class FileMergerService {
     private void verifyResourcesExist(Resource... resources) throws IOException {
         for (Resource resource : resources) {
             if (!resource.exists()) {
-                throw new IOException("File not found: " + resource.getFilename());
+                String filename = resource.getFilename();
+                logger.error("File not found: {}", filename);
+                throw new IOException("File not found: " + filename);
             }
         }
     }
 
-    private List<MergedEntity> mergeEntities(File1Root file1Root, File2Root file2Root) {
-        if (file1Root == null || file2Root == null) {
+    private List<MergedEntity> mergeEntities(File1Root financeData, File2Root kycData) {
+        if (financeData == null || kycData == null) {
             return Collections.emptyList();
         }
 
-        return file1Root.getResults().stream()
-            .filter(file1Result -> file1Result.getEntity() != null && 
-                                 file1Result.getEntity().getIdentifiers() != null)
-            .flatMap(file1Result -> {
-                Identifiers file1Identifiers = file1Result.getEntity().getIdentifiers();
-                String ptyId = file1Identifiers.getPtyId();
+        return financeData.getResults().stream()
+            .filter(result -> result.getEntity() != null && 
+                            result.getEntity().getIdentifiers() != null)
+            .flatMap(financeResult -> {
+                Identifiers identifiers = financeResult.getEntity().getIdentifiers();
+                String ptyId = identifiers.getPtyId();
                 
-                return file2Root.getResults().stream()
-                    .filter(file2Result -> file2Result.getIdentifiers() != null && 
-                                         !file2Result.getIdentifiers().isEmpty())
-                    .filter(file2Result -> ptyId.equals(file2Result.getIdentifiers().get(0).getPtyId()))
-                    .map(file2Result -> createMergedEntity(file1Result, file2Result));
+                return kycData.getResults().stream()
+                    .filter(kycResult -> kycResult.getIdentifiers() != null && 
+                                       !kycResult.getIdentifiers().isEmpty())
+                    .filter(kycResult -> ptyId.equals(kycResult.getIdentifiers().get(0).getPtyId()))
+                    .map(kycResult -> createMergedEntity(financeResult, kycResult));
             })
             .collect(Collectors.toList());
     }
 
-    private MergedEntity createMergedEntity(File1Result file1Result, File2Result file2Result) {
+    private MergedEntity createMergedEntity(File1Result financeResult, File2Result kycResult) {
         MergedEntity merged = new MergedEntity();
-        merged.setIdentifiers(file1Result.getEntity().getIdentifiers());
-        merged.setBusinessAddress(file1Result.getEntity().getBusinessAddress());
+        merged.setIdentifiers(financeResult.getEntity().getIdentifiers());
+        merged.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
         
-        KycData kycData = file2Result.getKycData();
+        KycData kycData = kycResult.getKycData();
         if (kycData != null) {
             merged.setKyCsites(kycData.getKyCsites());
             merged.setKyCsegments(kycData.getKyCsegment());
