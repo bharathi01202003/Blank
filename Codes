@@ -13,102 +13,124 @@ import org.springframework.util.StringUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
 @Service
-public class FileMergerService {
+public class DataLoaderService {
 
-    private static final Logger logger = LoggerFactory.getLogger(FileMergerService.class);
+    private static final Logger logger = LoggerFactory.getLogger(DataLoaderService.class);
     
-    @Value("${file.paths.finance}")
-    private String financeFilePath;
+    // Injection of configuration properties
+    @Value("${dataLoader.input.financeFile}")
+    private String financeFile;
     
-    @Value("${file.paths.kyc}")
-    private String kycFilePath;
+    @Value("${dataLoader.input.kycFile}")
+    private String kycFile;
+    
+    @Value("${dataLoader.output.file.path}")
+    private String outputFile;
+    
+    @Value("${dataLoader.output.prettyPrint}")
+    private boolean prettyPrint;
 
     private final ObjectMapper mapper;
 
-    public FileMergerService(ObjectMapper mapper) {
+    public DataLoaderService(ObjectMapper mapper) {
         this.mapper = mapper;
     }
 
-    public List<MergedEntity> mergeFiles() throws IOException, JsonProcessingException, IllegalArgumentException {
-        // Load resources using injected paths
-        Resource financeFileResource = new ClassPathResource(financeFilePath);
-        Resource kycFileResource = new ClassPathResource(kycFilePath);
+    /**
+     * Main service method to merge files and save output
+     * @return Path to the generated output file
+     * @throws IOException if file operations fail
+     * @throws JsonProcessingException if JSON processing fails
+     */
+    public Path processFiles() throws IOException, JsonProcessingException {
+        // 1. Load input files
+        Resource financeResource = new ClassPathResource(financeFile);
+        Resource kycResource = new ClassPathResource(kycFile);
         
-        verifyResourcesExist(financeFileResource, kycFileResource);
+        verifyFileExists(financeResource, "Finance file");
+        verifyFileExists(kycResource, "KYC file");
 
-        String financeJson = readFileContent(financeFileResource);
-        String kycJson = readFileContent(kycFileResource);
-        
-        if (!StringUtils.hasText(financeJson) || !StringUtils.hasText(kycJson)) {
-            throw new IllegalArgumentException("One or both files are empty");
-        }
+        // 2. Parse JSON
+        File1Root financeData = parseJsonFile(financeResource, File1Root.class);
+        File2Root kycData = parseJsonFile(kycResource, File2Root.class);
 
-        File1Root financeData = parseJson(financeJson, File1Root.class);
-        File2Root kycData = parseJson(kycJson, File2Root.class);
+        // 3. Merge data
+        List<MergedEntity> result = mergeData(financeData, kycData);
+        logger.info("Merged {} records successfully", result.size());
 
-        logger.info("Successfully parsed files: {} and {}", financeFilePath, kycFilePath);
-        return mergeEntities(financeData, kycData);
+        // 4. Generate output
+        String outputJson = generateOutput(result);
+        return writeOutputFile(outputJson);
     }
 
-    private String readFileContent(Resource resource) throws IOException {
+    private <T> T parseJsonFile(Resource resource, Class<T> valueType) throws IOException {
         try (InputStream is = resource.getInputStream()) {
-            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
-        }
-    }
-
-    private <T> T parseJson(String json, Class<T> valueType) throws JsonProcessingException {
-        return mapper.readValue(json, valueType);
-    }
-
-    private void verifyResourcesExist(Resource... resources) throws IOException {
-        for (Resource resource : resources) {
-            if (!resource.exists()) {
-                String filename = resource.getFilename();
-                logger.error("File not found: {}", filename);
-                throw new IOException("File not found: " + filename);
+            String content = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            if (!StringUtils.hasText(content)) {
+                throw new IOException("File is empty: " + resource.getFilename());
             }
+            return mapper.readValue(content, valueType);
         }
     }
 
-    private List<MergedEntity> mergeEntities(File1Root financeData, File2Root kycData) {
+    private void verifyFileExists(Resource resource, String fileDescription) throws IOException {
+        if (!resource.exists()) {
+            String error = String.format("%s not found at: %s", fileDescription, resource.getURL());
+            logger.error(error);
+            throw new IOException(error);
+        }
+    }
+
+    private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
         if (financeData == null || kycData == null) {
             return Collections.emptyList();
         }
 
         return financeData.getResults().stream()
-            .filter(result -> result.getEntity() != null && 
-                            result.getEntity().getIdentifiers() != null)
-            .flatMap(financeResult -> {
-                Identifiers identifiers = financeResult.getEntity().getIdentifiers();
-                String ptyId = identifiers.getPtyId();
-                
-                return kycData.getResults().stream()
-                    .filter(kycResult -> kycResult.getIdentifiers() != null && 
-                                       !kycResult.getIdentifiers().isEmpty())
-                    .filter(kycResult -> ptyId.equals(kycResult.getIdentifiers().get(0).getPtyId()))
-                    .map(kycResult -> createMergedEntity(financeResult, kycResult));
-            })
+            .filter(f -> f.getEntity() != null && f.getEntity().getIdentifiers() != null)
+            .flatMap(finance -> kycData.getResults().stream()
+                .filter(kyc -> kyc.getIdentifiers() != null && !kyc.getIdentifiers().isEmpty())
+                .filter(kyc -> finance.getEntity().getIdentifiers().getPtyId()
+                    .equals(kyc.getIdentifiers().get(0).getPtyId()))
+                .map(kyc -> createMergedEntity(finance, kyc))
+            )
             .collect(Collectors.toList());
     }
 
-    private MergedEntity createMergedEntity(File1Result financeResult, File2Result kycResult) {
-        MergedEntity merged = new MergedEntity();
-        merged.setIdentifiers(financeResult.getEntity().getIdentifiers());
-        merged.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
+    private MergedEntity createMergedEntity(File1Result finance, File2Result kyc) {
+        MergedEntity entity = new MergedEntity();
+        entity.setIdentifiers(finance.getEntity().getIdentifiers());
+        entity.setBusinessAddress(finance.getEntity().getBusinessAddress());
         
-        KycData kycData = kycResult.getKycData();
+        KycData kycData = kyc.getKycData();
         if (kycData != null) {
-            merged.setKyCsites(kycData.getKyCsites());
-            merged.setKyCsegments(kycData.getKyCsegment());
-            merged.setRiskIndustry(kycData.getRiskIndustry());
+            entity.setKyCsites(kycData.getKyCsites());
+            entity.setKyCsegments(kycData.getKyCsegment());
+            entity.setRiskIndustry(kycData.getRiskIndustry());
         }
         
-        return merged;
+        return entity;
+    }
+
+    private String generateOutput(List<MergedEntity> data) throws JsonProcessingException {
+        return prettyPrint 
+            ? mapper.writerWithDefaultPrettyPrinter().writeValueAsString(data)
+            : mapper.writeValueAsString(data);
+    }
+
+    private Path writeOutputFile(String content) throws IOException {
+        Path outputPath = Paths.get(outputFile);
+        Files.createDirectories(outputPath.getParent());
+        Files.write(outputPath, content.getBytes(StandardCharsets.UTF_8));
+        return outputPath;
     }
 }
