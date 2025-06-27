@@ -1,136 +1,43 @@
-package com.example.service;
+package com.example;
 
-import com.example.model.*;
-import com.fasterxml.jackson.core.JsonProcessingException;
+import com.example.model.MergedEntity;
+import com.example.service.KycMergeService;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.core.io.Resource;
-import org.springframework.stereotype.Service;
-import org.springframework.util.StringUtils;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.stereotype.Component;
 
+import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.charset.StandardCharsets;
-import java.util.Collections;
 import java.util.List;
-import java.util.stream.Collectors;
 
-@Service
-public class DataLoaderService {
+@Component
+public class SUNScreeningReport implements ApplicationRunner {
 
-    private static final Logger logger = LoggerFactory.getLogger(DataLoaderService.class);
-    
-    // Injection of configuration properties
-    @Value("${dataLoader.input.financeFile}")
-    private String financeFile;
-    
-    @Value("${dataLoader.input.kycFile}")
-    private String kycFile;
-    
-    @Value("${dataLoader.output.file.path}")
-    private String outputFile;
-    
-    @Value("${dataLoader.output.prettyPrint}")
-    private boolean prettyPrint;
-
+    private final KycMergeService service;
     private final ObjectMapper mapper;
 
-    public DataLoaderService(ObjectMapper mapper) {
+    // Injecting the output file path from application.properties
+    @Value("${dataLoader.output.file.path}")
+    private String outputPath;
+
+    public SUNScreeningReport(KycMergeService service, ObjectMapper mapper) {
+        this.service = service;
         this.mapper = mapper;
     }
 
-    /**
-     * Main service method to merge files and save output
-     * @return Path to the generated output file
-     * @throws IOException if file operations fail
-     * @throws JsonProcessingException if JSON processing fails
-     */
-    public Path processFiles() throws IOException, JsonProcessingException {
-        // 1. Load input files
-        Resource financeResource = new ClassPathResource(financeFile);
-        Resource kycResource = new ClassPathResource(kycFile);
-        
-        verifyFileExists(financeResource, "Finance file");
-        verifyFileExists(kycResource, "KYC file");
+    @Override
+    public void run(ApplicationArguments args) {
+        try {
+            List<MergedEntity> result = service.mergeFiles();
 
-        // 2. Parse JSON
-        File1Root financeData = parseJsonFile(financeResource, File1Root.class);
-        File2Root kycData = parseJsonFile(kycResource, File2Root.class);
-
-        // 3. Merge data
-        List<MergedEntity> result = mergeData(financeData, kycData);
-        logger.info("Merged {} records successfully", result.size());
-
-        // 4. Generate output
-        String outputJson = generateOutput(result);
-        return writeOutputFile(outputJson);
-    }
-
-    private <T> T parseJsonFile(Resource resource, Class<T> valueType) throws IOException {
-        try (InputStream is = resource.getInputStream()) {
-            String content = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-            if (!StringUtils.hasText(content)) {
-                throw new IOException("File is empty: " + resource.getFilename());
-            }
-            return mapper.readValue(content, valueType);
+            // Use the injected output path
+            mapper.writerWithDefaultPrettyPrinter().writeValue(new File(outputPath), result);
+            System.out.println("Size: " + result.size());
+            System.out.println("Output path: " + outputPath);
+        } catch (Exception e) {
+            e.printStackTrace();
         }
-    }
-
-    private void verifyFileExists(Resource resource, String fileDescription) throws IOException {
-        if (!resource.exists()) {
-            String error = String.format("%s not found at: %s", fileDescription, resource.getURL());
-            logger.error(error);
-            throw new IOException(error);
-        }
-    }
-
-    private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
-        if (financeData == null || kycData == null) {
-            return Collections.emptyList();
-        }
-
-        return financeData.getResults().stream()
-            .filter(f -> f.getEntity() != null && f.getEntity().getIdentifiers() != null)
-            .flatMap(finance -> kycData.getResults().stream()
-                .filter(kyc -> kyc.getIdentifiers() != null && !kyc.getIdentifiers().isEmpty())
-                .filter(kyc -> finance.getEntity().getIdentifiers().getPtyId()
-                    .equals(kyc.getIdentifiers().get(0).getPtyId()))
-                .map(kyc -> createMergedEntity(finance, kyc))
-            )
-            .collect(Collectors.toList());
-    }
-
-    private MergedEntity createMergedEntity(File1Result finance, File2Result kyc) {
-        MergedEntity entity = new MergedEntity();
-        entity.setIdentifiers(finance.getEntity().getIdentifiers());
-        entity.setBusinessAddress(finance.getEntity().getBusinessAddress());
-        
-        KycData kycData = kyc.getKycData();
-        if (kycData != null) {
-            entity.setKyCsites(kycData.getKyCsites());
-            entity.setKyCsegments(kycData.getKyCsegment());
-            entity.setRiskIndustry(kycData.getRiskIndustry());
-        }
-        
-        return entity;
-    }
-
-    private String generateOutput(List<MergedEntity> data) throws JsonProcessingException {
-        return prettyPrint 
-            ? mapper.writerWithDefaultPrettyPrinter().writeValueAsString(data)
-            : mapper.writeValueAsString(data);
-    }
-
-    private Path writeOutputFile(String content) throws IOException {
-        Path outputPath = Paths.get(outputFile);
-        Files.createDirectories(outputPath.getParent());
-        Files.write(outputPath, content.getBytes(StandardCharsets.UTF_8));
-        return outputPath;
     }
 }
