@@ -1,80 +1,32 @@
-package com.example.service;
+package org.example.config;
 
-import com.example.model.GenericEntity;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
-import org.springframework.stereotype.Service;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.core5.ssl.SSLContextBuilder;
+import org.apache.hc.core5.ssl.SSLContexts;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
+import javax.net.ssl.*;
 
-import java.io.File;
-import java.util.ArrayList;
-import java.util.List;
+@Configuration
+public class AppConfig {
 
-@Slf4j
-@Service
-public class DataMerger implements ApplicationRunner {
+    @Bean
+    public RestTemplate restTemplate() throws Exception {
+        // Configure SSL to trust all certificates
+        SSLContext sslContext = SSLContexts.custom()
+                .loadTrustMaterial(null, (cert, authType) -> true)
+                .build();
 
-    private final RestTemplate restTemplate;
-    private final ObjectMapper objectMapper;
+        // Create HTTP client with custom SSL settings
+        CloseableHttpClient httpClient = HttpClients.custom()
+                .setSSLContext(sslContext)
+                .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+                .build();
 
-    public DataMerger(RestTemplate restTemplate, ObjectMapper objectMapper) {
-        this.restTemplate = restTemplate;
-        this.objectMapper = objectMapper;
-    }
-
-    @Override
-    public void run(ApplicationArguments args) throws Exception {
-        log.info("Starting data merging process");
-
-        // 1. Load finance data
-        List<GenericEntity> financeEntities = loadEntities("https://api.example.com/finance");
-        log.info("Loaded {} finance entities", financeEntities.size());
-
-        // 2. Load KYC data
-        List<GenericEntity> kycEntities = loadEntities("https://api.example.com/kyc");
-        log.info("Loaded {} KYC entities", kycEntities.size());
-
-        // 3. Define identifier fields
-        String[] identifierPaths = {
-            "entity.Identifiers.ptyId",
-            "entity.Identifiers.crdsCode",
-            "entity.Identifiers.kycId"
-        };
-
-        // 4. Match and merge entities
-        List<JsonNode> mergedResults = new ArrayList<>();
-        for (GenericEntity financeEntity : financeEntities) {
-            for (GenericEntity kycEntity : kycEntities) {
-                if (financeEntity.matches(kycEntity, identifierPaths)) {
-                    mergedResults.add(financeEntity.mergeWith(kycEntity));
-                    log.debug("Merged entities with ptyId: {}", 
-                        financeEntity.getValue("entity.Identifiers.ptyId", Integer.class));
-                }
-            }
-        }
-
-        // 5. Save results
-        objectMapper.writerWithDefaultPrettyPrinter()
-                   .writeValue(new File("merged_results.json"), mergedResults);
-        
-        log.info("Successfully merged {} entities", mergedResults.size());
-    }
-
-    private List<GenericEntity> loadEntities(String url) {
-        JsonNode response = restTemplate.getForObject(url, JsonNode.class);
-        List<GenericEntity> entities = new ArrayList<>();
-        
-        if (response != null && response.has("results")) {
-            for (JsonNode entityNode : response.path("results")) {
-                GenericEntity entity = new GenericEntity();
-                entity.setData(entityNode);
-                entities.add(entity);
-            }
-        }
-        
-        return entities;
+        // Configure RestTemplate with custom HttpClient
+        return new RestTemplate(new HttpComponentsClientHttpRequestFactory(httpClient));
     }
 }
