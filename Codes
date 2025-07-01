@@ -1,101 +1,51 @@
-package org.example.service;
+package org.example.controller;
 
-import org.example.exception.ApiException;
-import org.example.model.*;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
+import org.example.model.MergedEntity;
+import org.example.service.EntityMergerService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
-import javax.annotation.PostConstruct;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.List;
+import java.util.Optional;
 
-@Service
-public class EntityMergerService {
+@RestController
+@RequestMapping("/entity")
+public class KycController {
 
-    private final List<MergedEntity> mergedEntities = Collections.synchronizedList(new ArrayList<>());
-    private final RestTemplate restTemplate;
+    @Autowired
+    private EntityMergerService service;
 
-    @Value("${finance.api.url}")
-    private String financeApiUrl;
-
-    @Value("${kyc.api.url}")
-    private String kycApiUrl;
-
-    public EntityMergerService(RestTemplate restTemplate) {
-        this.restTemplate = restTemplate;
+    public KycController(EntityMergerService service) {
+        this.service = service;
     }
 
-    @PostConstruct
-    public void init() {
-        loadAndMergeData();
+    // Endpoint to get all merged data
+    @GetMapping
+    public List<MergedEntity> getMergedData() {
+        return service.getAll();
     }
 
-    private void loadAndMergeData() {
-        try {
-            FinanceFile financeData = restTemplate.getForObject(financeApiUrl, FinanceFile.class);
-            KYCFile kycData = restTemplate.getForObject(kycApiUrl, KYCFile.class);
-
-            if (financeData != null && kycData != null) {
-                List<MergedEntity> newMerged = financeData.getResults().getEntities().stream()
-                        .flatMap(financeEntity -> 
-                            kycData.getResults().stream()
-                                .flatMap(kycResult -> {
-                                    KycData kycDataItem = kycResult.getKycData();
-                                    return kycDataItem.getKyCsites().stream()
-                                            .filter(kycSite -> containsIdentifier(financeEntity, kycSite.getSiteEntity()))
-                                            .map(kycSite -> mergeEntities(financeEntity, kycDataItem, kycSite));
-                                })
-                        )
-                        .collect(Collectors.toList());
-
-                synchronized (mergedEntities) {
-                    mergedEntities.clear();
-                    mergedEntities.addAll(newMerged);
-                }
-            }
-        } catch (Exception e) {
-            throw new ApiException("Failed to merge data from APIs", e);
-        }
+    // Endpoint to refresh data from APIs
+    @GetMapping("/refresh")
+    public String refreshData() {
+        service.refreshData();
+        return "Data refreshed successfully";
     }
 
-    private boolean containsIdentifier(Entity financeEntity, String kycSiteEntity) {
-        return financeEntity.getIdentifiers().getPtyId().equals(kycSiteEntity);
+    // Endpoint to get merged data by sector
+    @GetMapping("/sector/{sector}")
+    public List<MergedEntity> getBySector(@PathVariable String sector) {
+        return service.getBySector(sector);
     }
 
-    private MergedEntity mergeEntities(Entity finance, KycData kycData, KYCsites kycSite) {
-        MergedEntity merged = new MergedEntity();
-        merged.setIdentifiers(finance.getIdentifiers());
-        merged.setBusinessAddress(finance.getBusinessAddress());
-        merged.setKyCsites(Collections.singletonList(kycSite));
-        merged.setKyCsegment(kycData.getKyCsegment());
-        merged.setRiskIndustry(kycData.getRiskIndustry());
-        return merged;
-    }
-
-    public void refreshData() {
-        loadAndMergeData();
-    }
-
-    public List<MergedEntity> getBySector(String sector) {
-        synchronized (mergedEntities) {
-            return mergedEntities.stream()
-                    .filter(entity -> entity.getBusinessAddress().getCity().equalsIgnoreCase(sector)) // Adjust this based on your actual filtering logic
-                    .collect(Collectors.toList());
-        }
-    }
-
-    public Optional<MergedEntity> getByIdentifier(Identifiers identifier) {
-        synchronized (mergedEntities) {
-            return mergedEntities.stream()
-                    .filter(entity -> entity.getIdentifiers().equals(identifier))
-                    .findFirst();
-        }
-    }
-
-    public List<MergedEntity> getAll() {
-        synchronized (mergedEntities) {
-            return new ArrayList<>(mergedEntities);
-        }
+    // Endpoint to get merged data by identifier
+    @GetMapping("/identifier/{ptyId}")
+    public Optional<MergedEntity> getByIdentifier(@PathVariable String ptyId) {
+        Identifiers identifier = new Identifiers();
+        identifier.setPtyId(ptyId);
+        return service.getByIdentifier(identifier);
     }
 }
