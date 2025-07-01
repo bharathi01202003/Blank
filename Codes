@@ -1,6 +1,8 @@
-package com.example.service;
+// EntityMergerService.java
+package org.example.service;
 
-import com.example.dto.*;
+import org.example.exception.ApiException;
+import org.example.model.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
@@ -11,13 +13,13 @@ import java.util.stream.Collectors;
 
 @Service
 public class EntityMergerService {
-    
-    private final List<MergedEntity> mergedEntities = new ArrayList<>();
+
+    private final List<MergedEntity> mergedEntities = Collections.synchronizedList(new ArrayList<>());
     private final RestTemplate restTemplate;
-    
+
     @Value("${finance.api.url}")
     private String financeApiUrl;
-    
+
     @Value("${kyc.api.url}")
     private String kycApiUrl;
 
@@ -26,30 +28,40 @@ public class EntityMergerService {
     }
 
     @PostConstruct
-    public void loadAndMergeData() {
+    public void init() {
+        loadAndMergeData();
+    }
+
+    private void loadAndMergeData() {
         try {
             FinanceFile financeData = restTemplate.getForObject(financeApiUrl, FinanceFile.class);
             KYCFile kycData = restTemplate.getForObject(kycApiUrl, KYCFile.class);
-            
-            if (financeData != null && financeData.getEntities() != null 
-                && kycData != null && kycData.getEntities() != null) {
-                
-                this.mergedEntities.addAll(
-                    financeData.getEntities().stream()
+
+            if (financeData != null && kycData != null) {
+                List<MergedEntity> newMerged = financeData.getResults().stream()
+                        .flatMap(financeResult -> financeResult.getEntities().stream())
                         .flatMap(financeEntity -> 
-                            kycData.getEntities().stream()
-                                .filter(kycEntity -> financeEntity.getIdentifiers().contains(kycEntity.getIdentifier()))
+                            kycData.getResults().stream()
+                                .filter(kycEntity -> containsIdentifier(financeEntity, kycEntity.getIdentifier()))
                                 .map(kycEntity -> mergeEntities(financeEntity, kycEntity))
                         )
-                        .collect(Collectors.toList())
-                );
+                        .collect(Collectors.toList());
+
+                synchronized (mergedEntities) {
+                    mergedEntities.clear();
+                    mergedEntities.addAll(newMerged);
+                }
             }
         } catch (Exception e) {
-            throw new ApiException("Error loading and merging data from APIs", e);
+            throw new ApiException("Failed to merge data from APIs", e);
         }
     }
 
-    private MergedEntity mergeEntities(FinanceEntity finance, KYCEntity kyc) {
+    private boolean containsIdentifier(Entity financeEntity, Identifiers kycIdentifier) {
+        return financeEntity.getIdentifiers().contains(kycIdentifier);
+    }
+
+    private MergedEntity mergeEntities(Entity finance, File2Result kyc) {
         MergedEntity merged = new MergedEntity();
         merged.setIdentifiers(finance.getIdentifiers());
         merged.setBusinessAddress(finance.getBusinessAddress());
@@ -59,20 +71,29 @@ public class EntityMergerService {
         return merged;
     }
 
-    // Business methods
-    public List<MergedEntity> getBySector(String sector) {
-        return mergedEntities.stream()
-            .filter(entity -> entity.getSector().equalsIgnoreCase(sector))
-            .collect(Collectors.toList());
+    public void refreshData() {
+        loadAndMergeData();
     }
 
-    public Optional<MergedEntity> getByIdentifier(String identifier) {
-        return mergedEntities.stream()
-            .filter(entity -> entity.getIdentifiers().contains(identifier))
-            .findFirst();
+    public List<MergedEntity> getBySector(String sector) {
+        synchronized (mergedEntities) {
+            return mergedEntities.stream()
+                    .filter(entity -> entity.getSector().equalsIgnoreCase(sector))
+                    .collect(Collectors.toList());
+        }
+    }
+
+    public Optional<MergedEntity> getByIdentifier(Identifiers identifier) {
+        synchronized (mergedEntities) {
+            return mergedEntities.stream()
+                    .filter(entity -> entity.getIdentifiers().contains(identifier))
+                    .findFirst();
+        }
     }
 
     public List<MergedEntity> getAll() {
-        return Collections.unmodifiableList(mergedEntities);
+        synchronized (mergedEntities) {
+            return new ArrayList<>(mergedEntities);
+        }
     }
 }
