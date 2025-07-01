@@ -1,58 +1,80 @@
-package com.example.model;
+package com.example.service;
 
+import com.example.model.GenericEntity;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 
-@Data
-public class GenericEntity {
-    private JsonNode data;
-    private static final ObjectMapper mapper = new ObjectMapper();
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
 
-    public <T> T getValue(String path, Class<T> type) {
-        String[] segments = path.split("\\.");
-        JsonNode current = data;
+@Slf4j
+@Service
+public class DataMerger implements ApplicationRunner {
+
+    private final RestTemplate restTemplate;
+    private final ObjectMapper objectMapper;
+
+    public DataMerger(RestTemplate restTemplate, ObjectMapper objectMapper) {
+        this.restTemplate = restTemplate;
+        this.objectMapper = objectMapper;
+    }
+
+    @Override
+    public void run(ApplicationArguments args) throws Exception {
+        log.info("Starting data merging process");
+
+        // 1. Load finance data
+        List<GenericEntity> financeEntities = loadEntities("https://api.example.com/finance");
+        log.info("Loaded {} finance entities", financeEntities.size());
+
+        // 2. Load KYC data
+        List<GenericEntity> kycEntities = loadEntities("https://api.example.com/kyc");
+        log.info("Loaded {} KYC entities", kycEntities.size());
+
+        // 3. Define identifier fields
+        String[] identifierPaths = {
+            "entity.Identifiers.ptyId",
+            "entity.Identifiers.crdsCode",
+            "entity.Identifiers.kycId"
+        };
+
+        // 4. Match and merge entities
+        List<JsonNode> mergedResults = new ArrayList<>();
+        for (GenericEntity financeEntity : financeEntities) {
+            for (GenericEntity kycEntity : kycEntities) {
+                if (financeEntity.matches(kycEntity, identifierPaths)) {
+                    mergedResults.add(financeEntity.mergeWith(kycEntity));
+                    log.debug("Merged entities with ptyId: {}", 
+                        financeEntity.getValue("entity.Identifiers.ptyId", Integer.class));
+                }
+            }
+        }
+
+        // 5. Save results
+        objectMapper.writerWithDefaultPrettyPrinter()
+                   .writeValue(new File("merged_results.json"), mergedResults);
         
-        for (String segment : segments) {
-            current = current.path(segment);
-            if (current.isMissingNode()) {
-                return null;
+        log.info("Successfully merged {} entities", mergedResults.size());
+    }
+
+    private List<GenericEntity> loadEntities(String url) {
+        JsonNode response = restTemplate.getForObject(url, JsonNode.class);
+        List<GenericEntity> entities = new ArrayList<>();
+        
+        if (response != null && response.has("results")) {
+            for (JsonNode entityNode : response.path("results")) {
+                GenericEntity entity = new GenericEntity();
+                entity.setData(entityNode);
+                entities.add(entity);
             }
         }
         
-        return mapper.convertValue(current, type);
-    }
-
-    public boolean matches(GenericEntity other, String[] identifierPaths) {
-        for (String path : identifierPaths) {
-            JsonNode thisValue = getNode(path);
-            JsonNode otherValue = other.getNode(path);
-            
-            if (thisValue == null || otherValue == null || !thisValue.equals(otherValue)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private JsonNode getNode(String path) {
-        String[] segments = path.split("\\.");
-        JsonNode current = data;
-        
-        for (String segment : segments) {
-            current = current.path(segment);
-            if (current.isMissingNode()) {
-                return null;
-            }
-        }
-        return current;
-    }
-
-    public JsonNode mergeWith(GenericEntity other) {
-        ObjectNode merged = mapper.createObjectNode();
-        merged.set("finance", data.deepCopy());
-        merged.set("kyc", other.getData().deepCopy());
-        return merged;
+        return entities;
     }
 }
