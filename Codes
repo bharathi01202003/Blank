@@ -1,4 +1,3 @@
-// EntityMergerService.java
 package org.example.service;
 
 import org.example.exception.ApiException;
@@ -38,12 +37,15 @@ public class EntityMergerService {
             KYCFile kycData = restTemplate.getForObject(kycApiUrl, KYCFile.class);
 
             if (financeData != null && kycData != null) {
-                List<MergedEntity> newMerged = financeData.getResults().stream()
-                        .flatMap(financeResult -> financeResult.getEntities().stream())
+                List<MergedEntity> newMerged = financeData.getResults().getEntities().stream()
                         .flatMap(financeEntity -> 
                             kycData.getResults().stream()
-                                .filter(kycEntity -> containsIdentifier(financeEntity, kycEntity.getIdentifier()))
-                                .map(kycEntity -> mergeEntities(financeEntity, kycEntity))
+                                .flatMap(kycResult -> {
+                                    KycData kycDataItem = kycResult.getKycData();
+                                    return kycDataItem.getKyCsites().stream()
+                                            .filter(kycSite -> containsIdentifier(financeEntity, kycSite.getSiteEntity()))
+                                            .map(kycSite -> mergeEntities(financeEntity, kycDataItem, kycSite));
+                                })
                         )
                         .collect(Collectors.toList());
 
@@ -57,17 +59,17 @@ public class EntityMergerService {
         }
     }
 
-    private boolean containsIdentifier(Entity financeEntity, Identifiers kycIdentifier) {
-        return financeEntity.getIdentifiers().contains(kycIdentifier);
+    private boolean containsIdentifier(Entity financeEntity, String kycSiteEntity) {
+        return financeEntity.getIdentifiers().getPtyId().equals(kycSiteEntity);
     }
 
-    private MergedEntity mergeEntities(Entity finance, File2Result kyc) {
+    private MergedEntity mergeEntities(Entity finance, KycData kycData, KYCsites kycSite) {
         MergedEntity merged = new MergedEntity();
         merged.setIdentifiers(finance.getIdentifiers());
         merged.setBusinessAddress(finance.getBusinessAddress());
-        merged.setSector(finance.getSector());
-        merged.setRestrictedCountries(kyc.getRestrictedCountries());
-        merged.setRiskProfile(kyc.getRiskProfile());
+        merged.setKyCsites(Collections.singletonList(kycSite));
+        merged.setKyCsegment(kycData.getKyCsegment());
+        merged.setRiskIndustry(kycData.getRiskIndustry());
         return merged;
     }
 
@@ -78,7 +80,7 @@ public class EntityMergerService {
     public List<MergedEntity> getBySector(String sector) {
         synchronized (mergedEntities) {
             return mergedEntities.stream()
-                    .filter(entity -> entity.getSector().equalsIgnoreCase(sector))
+                    .filter(entity -> entity.getBusinessAddress().getCity().equalsIgnoreCase(sector)) // Adjust this based on your actual filtering logic
                     .collect(Collectors.toList());
         }
     }
@@ -86,7 +88,7 @@ public class EntityMergerService {
     public Optional<MergedEntity> getByIdentifier(Identifiers identifier) {
         synchronized (mergedEntities) {
             return mergedEntities.stream()
-                    .filter(entity -> entity.getIdentifiers().contains(identifier))
+                    .filter(entity -> entity.getIdentifiers().equals(identifier))
                     .findFirst();
         }
     }
