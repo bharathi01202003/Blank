@@ -1,58 +1,96 @@
-package com.example.service;
-
 import com.example.model.*;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
-
+import javax.annotation.PostConstruct;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 @Service
 public class KycMergeService {
 
-    private static final Logger logger = LoggerFactory.getLogger(KycMergeService.class);
-    
-    @Value("${api.finance.url}")
-    private String financeApiUrl;
-    
-    @Value("${api.kyc.url}")
-    private String kycApiUrl;
-
+    private final List<MergedEntity> mergedEntities = new CopyOnWriteArrayList<>();
     private final RestTemplate restTemplate;
     
-    // Store merged entities in a map using `ptyId` as the key
-    private final Map<String, MergedEntity> mergedEntitiesMap = new HashMap<>();
+    @Value("${finance.api.url}")
+    private String financeApiUrl;
+    
+    @Value("${kyc.api.url}")
+    private String kycApiUrl;
 
     public KycMergeService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
     }
 
-    /**
-     * Merges all entities from finance and KYC APIs into a map.
-     * @return The map of all merged entities
-     */
-    public Map<String, MergedEntity> mergeAllEntities() {
-        File1Root financeData = fetchFinanceData();
-        File2Root kycData = fetchKycData();
+    @PostConstruct
+    public void initializeMergedData() {
+        try {
+            // 1. Fetch data from APIs
+            File1Root financeData = restTemplate.getForObject(financeApiUrl, File1Root.class);
+            File2Root kycData = restTemplate.getForObject(kycApiUrl, File2Root.class);
+            
+            if (financeData != null && kycData != null) {
+                // 2. Perform the merge
+                mergedEntities.addAll(mergeEntities(financeData, kycData));
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to initialize merged KYC data", e);
+        }
+    }
 
-        // Clear existing entries
-        mergedEntitiesMap.clear();
+    private List<MergedEntity> mergeEntities(File1Root financeData, File2Root kycData) {
+        return kycData.getResults().stream()
+            .filter(kycResult -> kycResult.getIdentifiers() != null && !kycResult.getIdentifiers().isEmpty())
+            .flatMap(kycResult -> {
+                // Get the single KYC identifier
+                String kycIdentifier = kycResult.getIdentifiers().get(0).getPtyId();
+                
+                return financeData.getResults().stream()
+                    .filter(finResult -> finResult.getEntity() != null)
+                    .filter(finResult -> containsIdentifier(finResult.getEntity().getIdentifiers(), kycIdentifier))
+                    .map(finResult -> createMergedEntity(finResult, kycResult));
+            })
+            .collect(Collectors.toList());
+    }
 
-        if (financeData != null && kycData != null) {
-            financeData.getResults().forEach(financeResult -> {
-                if (financeResult.getEntity() != null && 
-                    financeResult.getEntity().getIdentifiers() != null && 
-                    financeResult.getEntity().getIdentifiers().getPtyId() != null) {
-                    
-                    String ptyId = financeResult.getEntity().getIdentifiers().getPtyId();
+    private boolean containsIdentifier(Identifiers identifiers, String targetId) {
+        return identifiers != null && targetId.equals(identifiers.getPtyId());
+    }
 
-                    // Find matching KYC results
-                    kycData.getResults().stream()
-                        .filter(kycResult -> kycResult.getIdentifiers() != null && 
-                                !kycResult.getIdentifiers().isEmpty())
-                        .filter(kycResult -> ptyId.equals(kycResult.getIdentifiers().get(0).getPtyId()))
-                        .findFirst()
-              
+    private MergedEntity createMergedEntity(File1Result financeData, File2Result kycData) {
+        MergedEntity merged = new MergedEntity();
+        
+        // Set finance data
+        merged.setIdentifiers(financeData.getEntity().getIdentifiers());
+        merged.setBusinessAddress(financeData.getEntity().getBusinessAddress());
+        
+        // Set KYC data
+        if (kycData.getKycData() != null) {
+            merged.setKyCsites(kycData.getKycData().getKyCsites());
+            merged.setRiskIndustry(kycData.getKycData().getRiskIndustry());
+            merged.setKyCsegments(kycData.getKycData().getKyCsegment());
+        }
+        
+        return merged;
+    }
+
+    // DATA ACCESS METHODS
+    
+    public List<MergedEntity> getEntitiesByIdentifier(String ptyId) {
+        return mergedEntities.stream()
+            .filter(entity -> entity.getIdentifiers() != null)
+            .filter(entity -> ptyId.equals(entity.getIdentifiers().getPtyId()))
+            .collect(Collectors.toList());
+    }
+
+    public List<MergedEntity> getEntitiesByRiskIndustry(String riskIndustry) {
+        return mergedEntities.stream()
+            .filter(entity -> riskIndustry.equalsIgnoreCase(entity.getRiskIndustry()))
+            .collect(Collectors.toList());
+    }
+
+    public List<MergedEntity> getAllMergedEntities() {
+        return Collections.unmodifiableList(mergedEntities);
+    }
+}
