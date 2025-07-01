@@ -1,34 +1,78 @@
-<project xmlns="http://maven.apache.org/POM/4.0.0" 
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
+package com.example.service;
+
+import com.example.dto.*;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+
+import javax.annotation.PostConstruct;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Service
+public class EntityMergerService {
     
-    <groupId>org.example</groupId>
-    <artifactId>your-artifact-id</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    private final List<MergedEntity> mergedEntities = new ArrayList<>();
+    private final RestTemplate restTemplate;
     
-    <properties>
-        <java.version>17</java.version>
-    </properties>
+    @Value("${finance.api.url}")
+    private String financeApiUrl;
     
-    <dependencies>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.httpcomponents.client5</groupId>
-            <artifactId>httpclient5</artifactId>
-            <version>5.2.1</version> <!-- Use the latest version -->
-        </dependency>
-    </dependencies>
-    
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-            </plugin>
-        </plugins>
-    </build>
-</project>
+    @Value("${kyc.api.url}")
+    private String kycApiUrl;
+
+    public EntityMergerService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
+    }
+
+    @PostConstruct
+    public void loadAndMergeData() {
+        try {
+            FinanceFile financeData = restTemplate.getForObject(financeApiUrl, FinanceFile.class);
+            KYCFile kycData = restTemplate.getForObject(kycApiUrl, KYCFile.class);
+            
+            if (financeData != null && financeData.getEntities() != null 
+                && kycData != null && kycData.getEntities() != null) {
+                
+                this.mergedEntities.addAll(
+                    financeData.getEntities().stream()
+                        .flatMap(financeEntity -> 
+                            kycData.getEntities().stream()
+                                .filter(kycEntity -> financeEntity.getIdentifiers().contains(kycEntity.getIdentifier()))
+                                .map(kycEntity -> mergeEntities(financeEntity, kycEntity))
+                        )
+                        .collect(Collectors.toList())
+                );
+            }
+        } catch (Exception e) {
+            throw new ApiException("Error loading and merging data from APIs", e);
+        }
+    }
+
+    private MergedEntity mergeEntities(FinanceEntity finance, KYCEntity kyc) {
+        MergedEntity merged = new MergedEntity();
+        merged.setIdentifiers(finance.getIdentifiers());
+        merged.setBusinessAddress(finance.getBusinessAddress());
+        merged.setSector(finance.getSector());
+        merged.setRestrictedCountries(kyc.getRestrictedCountries());
+        merged.setRiskProfile(kyc.getRiskProfile());
+        return merged;
+    }
+
+    // Business methods
+    public List<MergedEntity> getBySector(String sector) {
+        return mergedEntities.stream()
+            .filter(entity -> entity.getSector().equalsIgnoreCase(sector))
+            .collect(Collectors.toList());
+    }
+
+    public Optional<MergedEntity> getByIdentifier(String identifier) {
+        return mergedEntities.stream()
+            .filter(entity -> entity.getIdentifiers().contains(identifier))
+            .findFirst();
+    }
+
+    public List<MergedEntity> getAll() {
+        return Collections.unmodifiableList(mergedEntities);
+    }
+}
