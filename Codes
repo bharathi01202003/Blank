@@ -1,4 +1,3 @@
-import com.fasterxml.jackson.annotation.JsonInclude;
 import com.sun.codemodel.JCodeModel;
 import org.jsonschema2pojo.*;
 import org.jsonschema2pojo.rules.RuleFactory;
@@ -10,17 +9,25 @@ import java.net.URL;
 public class Main {
 
     public static void main(String[] args) {
-        System.out.println("Hello, World!");
-
         try {
-            // Example usage
-            URL inputJsonUrl = new URL("https://example.com/schema.json");
-            File outputDir = new File("src/generated"); // Output directory
+            // Step 1: Local file path to JSON schema
+            File inputJsonFile = new File("src/main/resources/schema.json");
+
+            // Step 2: Convert File to URL
+            URL inputJsonUrl = inputJsonFile.toURI().toURL();
+
+            // Step 3: Output directory and class info
+            File outputDir = new File("src/generated"); // where Java classes will be saved
             String packageName = "com.example.generated";
             String javaClassName = "MyGeneratedClass";
 
+            // Step 4: Generate
             convertJsonToJavaClass(inputJsonUrl, outputDir, packageName, javaClassName);
-        } catch (IOException e) {
+
+            System.out.println("✅ Java class generated successfully!");
+
+        } catch (Exception e) {
+            System.err.println("❌ Error generating Java class: " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -35,17 +42,12 @@ public class Main {
         GenerationConfig config = new DefaultGenerationConfig() {
             @Override
             public boolean isGenerateBuilders() {
-                return true; // Generate builder methods
+                return true;
             }
 
             @Override
             public SourceType getSourceType() {
-                return SourceType.JSON; // Input is a raw JSON (not a schema file)
-            }
-
-            @Override
-            public boolean isIncludeConstructors() {
-                return true;
+                return SourceType.JSONSCHEMA;  // IMPORTANT: JSONSCHEMA for schema, JSON for raw sample
             }
 
             @Override
@@ -64,8 +66,8 @@ public class Main {
             }
 
             @Override
-            public JsonInclude.Include getInclusionLevel() {
-                return JsonInclude.Include.NON_NULL;
+            public InclusionLevel getInclusionLevel() {
+                return InclusionLevel.NON_NULL;
             }
         };
 
