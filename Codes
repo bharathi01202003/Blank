@@ -1,83 +1,49 @@
-import com.sun.codemodel.JCodeModel;
-import org.jsonschema2pojo.*;
+package com.example;
+
+import org.jsonschema2pojo.DefaultGenerationConfig;
+import org.jsonschema2pojo.GenerationConfig;
+import org.jsonschema2pojo.Jackson2Annotator;
+import org.jsonschema2pojo.SchemaMapper;
+import org.jsonschema2pojo.SchemaStore;
 import org.jsonschema2pojo.rules.RuleFactory;
 
+import com.sun.codemodel.JCodeModel;
+
 import java.io.File;
-import java.io.IOException;
 import java.net.URL;
 
-public class Main {
+public class PojoGenerator {
 
-    public static void main(String[] args) {
-        try {
-            // Step 1: Local file path to JSON schema
-            File inputJsonFile = new File("src/main/resources/schema.json");
+    public static void main(String[] args) throws Exception {
+        // Input JSON file (can also be a schema)
+        File inputJson = new File("src/main/resources/user.json");
 
-            // Step 2: Convert File to URL
-            URL inputJsonUrl = inputJsonFile.toURI().toURL();
+        // Output directory for generated Java classes
+        File outputJavaClassDirectory = new File("src/main/java");
 
-            // Step 3: Output directory and class info
-            File outputDir = new File("src/generated"); // where Java classes will be saved
-            String packageName = "com.example.generated";
-            String javaClassName = "MyGeneratedClass";
-
-            // Step 4: Generate
-            convertJsonToJavaClass(inputJsonUrl, outputDir, packageName, javaClassName);
-
-            System.out.println("✅ Java class generated successfully!");
-
-        } catch (Exception e) {
-            System.err.println("❌ Error generating Java class: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
-
-    public static void convertJsonToJavaClass(URL inputJsonUrl,
-                                              File outputJavaClassDirectory,
-                                              String packageName,
-                                              String javaClassName) throws IOException {
+        // Java package for generated classes
+        String packageName = "com.example.generated";
 
         JCodeModel codeModel = new JCodeModel();
 
         GenerationConfig config = new DefaultGenerationConfig() {
             @Override
-            public boolean isGenerateBuilders() {
-                return true;
-            }
+            public boolean isGenerateBuilders() { return true; }
 
             @Override
             public SourceType getSourceType() {
-                return SourceType.JSONSCHEMA;  // IMPORTANT: JSONSCHEMA for schema, JSON for raw sample
-            }
-
-            @Override
-            public boolean isIncludeHashcodeAndEquals() {
-                return true;
-            }
-
-            @Override
-            public boolean isIncludeToString() {
-                return true;
-            }
-
-            @Override
-            public AnnotationStyle getAnnotationStyle() {
-                return AnnotationStyle.JACKSON2;
-            }
-
-            @Override
-            public InclusionLevel getInclusionLevel() {
-                return InclusionLevel.NON_NULL;
+                return SourceType.JSON; // or JSONSCHEMA
             }
         };
 
         SchemaMapper mapper = new SchemaMapper(
                 new RuleFactory(config, new Jackson2Annotator(config), new SchemaStore()),
-                new SchemaGenerator()
-        );
+                new SchemaGenerator());
 
-        mapper.generate(codeModel, javaClassName, packageName, inputJsonUrl);
+        mapper.generate(codeModel, "User", packageName, inputJson.toURI().toURL());
 
         codeModel.build(outputJavaClassDirectory);
+
+        System.out.println("POJO generated successfully in " + outputJavaClassDirectory.getAbsolutePath());
     }
 }
