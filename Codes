@@ -1,163 +1,81 @@
-package com.example.demo;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.sun.codemodel.JCodeModel;
+import org.jsonschema2pojo.*;
+import org.jsonschema2pojo.rules.RuleFactory;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.context.annotation.Bean;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.web.client.RestTemplate;
-
-import javax.annotation.PostConstruct;
 import java.io.File;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Optional;
-import java.util.stream.Collectors;
+import java.io.IOException;
+import java.net.URL;
 
-@SpringBootApplication
-public class DemoApplication {
+public class Main {
 
     public static void main(String[] args) {
-        SpringApplication.run(DemoApplication.class, args);
-    }
+        System.out.println("Hello, World!");
 
-    @Bean
-    public RestTemplate restTemplate() {
-        return new RestTemplate();
-    }
-}
-
-@RestController
-@RequestMapping("/apt/kyc")
-class KycController {
-
-    @Autowired
-    @Qualifier("entityMergerService")
-    private final EntityMergerService service;
-
-    public KycController(EntityMergerService service) {
-        this.service = service;
-    }
-
-    @GetMapping
-    public List<MergedEntity> getMergedData() {
-        return service.getAll();
-    }
-
-    @GetMapping("/refresh")
-    public String refreshData() {
-        service.loadAndMergeData();
-        return "Data refreshed successfully";
-    }
-
-    @GetMapping("/sector/{sector}")
-    public List<MergedEntity> getBySector(@PathVariable String sector) {
-        return service.getBySector(sector);
-    }
-
-    @GetMapping("/identifier/{ptyId}")
-    public Optional<MergedEntity> getByIdentifier(@PathVariable String ptyId) {
-        return service.getByIdentifier(ptyId);
-    }
-}
-
-@Service
-class EntityMergerService {
-
-    @Autowired
-    private RestTemplate restTemplate;
-
-    @Value("${finance.api.url}")
-    private String financeApiUrl;
-
-    @Value("${kyc.api.url}")
-    private String kycApiUrl;
-
-    private final List<MergedEntity> mergedEntities = Collections.synchronizedList(new ArrayList<>());
-
-    @PostConstruct
-    public void loadAndMergeData() {
         try {
-            FinanceFile financeData = restTemplate.getForObject(financeApiUrl, FinanceFile.class);
-            KYCFile kycData = restTemplate.getForObject(kycApiUrl, KYCFile.class);
+            // Example usage
+            URL inputJsonUrl = new URL("https://example.com/schema.json");
+            File outputDir = new File("src/generated"); // Output directory
+            String packageName = "com.example.generated";
+            String javaClassName = "MyGeneratedClass";
 
-            if (financeData != null && kycData != null) {
-                List<MergedEntity> newMerged = financeData.getResults().getEntities().stream()
-                        .flatMap(financeEntity -> kycData.getResults().stream()
-                                .flatMap(kycResult -> {
-                                    KycData kycDataItem = kycResult.getKycData();
-                                    return kycDataItem.getKycSites().stream()
-                                            .filter(kycSite -> financeEntity.getIdentifiers().equals(kycSite.getSiteEntity()))
-                                            .map(kycSite -> mergeEntities(financeEntity, kycDataItem, kycSite));
-                                }))
-                        .collect(Collectors.toList());
-
-                synchronized (mergedEntities) {
-                    mergedEntities.clear();
-                    mergedEntities.addAll(newMerged);
-                }
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to load and merge data", e);
-        }
-    }
-
-    private MergedEntity mergeEntities(Entity finance, KycData kycData, KYCsites kycSite) {
-        MergedEntity merged = new MergedEntity();
-        merged.setIdentifiers(finance.getIdentifiers());
-        merged.setBusinessAddress(finance.getBusinessAddress());
-        merged.setKycSites(Collections.singletonList(kycSite));
-        merged.setKycSegment(kycData.getKycSegment());
-        merged.setRiskIndustry(kycData.getRiskIndustry().get(0));
-        return merged;
-    }
-
-    public List<MergedEntity> getAll() {
-        return Collections.unmodifiableList(mergedEntities);
-    }
-
-    public List<MergedEntity> getBySector(String sector) {
-        return mergedEntities.stream()
-                .filter(entity -> entity.getBusinessAddress().getCity().equalsIgnoreCase(sector))
-                .collect(Collectors.toList());
-    }
-
-    public Optional<MergedEntity> getByIdentifier(String ptyId) {
-        return mergedEntities.stream()
-                .filter(entity -> entity.getIdentifiers().getPtyId().equals(ptyId))
-                .findFirst();
-    }
-}
-
-@Component
-class SUNScreeningReport implements ApplicationRunner {
-
-    private final EntityMergerService service;
-    private final ObjectMapper mapper;
-
-    @Value("${dataLoader.output.file.path}")
-    private String outputPath;
-
-    @Autowired
-    public SUNScreeningReport(EntityMergerService service, ObjectMapper mapper) {
-        this.service = service;
-        this.mapper = mapper;
-    }
-
-    @Override
-    public void run(ApplicationArguments args) {
-        try {
-            List<MergedEntity> result = service.getAll();
-            mapper.writerWithDefaultPrettyPrinter().writeValue(new File(outputPath), result);
-            System.out.println("Size: " + result.size());
-            System.out.println("Output path: " + outputPath);
-        } catch (Exception e) {
+            convertJsonToJavaClass(inputJsonUrl, outputDir, packageName, javaClassName);
+        } catch (IOException e) {
             e.printStackTrace();
         }
+    }
+
+    public static void convertJsonToJavaClass(URL inputJsonUrl,
+                                              File outputJavaClassDirectory,
+                                              String packageName,
+                                              String javaClassName) throws IOException {
+
+        JCodeModel codeModel = new JCodeModel();
+
+        GenerationConfig config = new DefaultGenerationConfig() {
+            @Override
+            public boolean isGenerateBuilders() {
+                return true; // Generate builder methods
+            }
+
+            @Override
+            public SourceType getSourceType() {
+                return SourceType.JSON; // Input is a raw JSON (not a schema file)
+            }
+
+            @Override
+            public boolean isIncludeConstructors() {
+                return true;
+            }
+
+            @Override
+            public boolean isIncludeHashcodeAndEquals() {
+                return true;
+            }
+
+            @Override
+            public boolean isIncludeToString() {
+                return true;
+            }
+
+            @Override
+            public AnnotationStyle getAnnotationStyle() {
+                return AnnotationStyle.JACKSON2;
+            }
+
+            @Override
+            public JsonInclude.Include getInclusionLevel() {
+                return JsonInclude.Include.NON_NULL;
+            }
+        };
+
+        SchemaMapper mapper = new SchemaMapper(
+                new RuleFactory(config, new Jackson2Annotator(config), new SchemaStore()),
+                new SchemaGenerator()
+        );
+
+        mapper.generate(codeModel, javaClassName, packageName, inputJsonUrl);
+
+        codeModel.build(outputJavaClassDirectory);
     }
 }
