@@ -2,9 +2,11 @@ package com.example.merger.service;
 
 import com.example.model.finance.Entity;
 import com.example.model.finance.FinanceResult;
+import com.example.model.kyc.Identifier;
 import com.example.model.kyc.KycData;
 import com.example.model.kyc.KycResult;
 import com.example.merger.dto.MergedResult;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
@@ -26,14 +28,16 @@ public class MergerService {
         List<KycData> kycDataList = kycResult.getResults();
 
         return kycDataList.stream()
-                .flatMap(kycData -> financeEntities.stream()
-                        .filter(finEntity -> finEntity.getIdentifiers() != null &&
-                                finEntity.getIdentifiers().stream()
-                                        .anyMatch(finId -> finId.getKycid().equals(kycData.getIdentifier().getKycid())))
-                        .map(finEntity -> new MergedResult(
-                                kycData.getIdentifier().getKycid(),
-                                finEntity,
-                                kycData)))
-                .collect(Collectors.toList());
+                .flatMap(kycData -> kycData.getIdentifiers().stream()
+                        .flatMap(kycId -> financeEntities.stream()
+                                .filter(finEntity -> finEntity.getIdentifier() != null &&
+                                        finEntity.getIdentifier().getKycid().equals(kycId.getKycid()))
+                                .map(finEntity -> new MergedResult(
+                                        kycId.getKycid(),
+                                        finEntity,
+                                        kycData
+                                ))
+                        )
+                ).collect(Collectors.toList());
     }
 }
