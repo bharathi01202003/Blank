@@ -1,11 +1,11 @@
-package com.example.merger.service;
+package org.example.service;
 
-import com.example.model.finance.Entity;
-import com.example.model.finance.FinanceResult;
-import com.example.model.kyc.Identifier;
-import com.example.model.kyc.KycData;
-import com.example.model.kyc.KycResult;
-import com.example.merger.dto.MergedResult;
+import org.example.dto.MergedResult;
+import org.example.model.finance.Entity;
+import org.example.model.finance.FinanceResult;
+import org.example.model.kyc.Identifier;
+import org.example.model.kyc.KycData;
+import org.example.model.kyc.KycResult;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -24,14 +24,15 @@ public class MergerService {
         FinanceResult financeResult = restTemplate.getForObject("http://localhost:8081/finance", FinanceResult.class);
         KycResult kycResult = restTemplate.getForObject("http://localhost:8082/kyc", KycResult.class);
 
-        List<Entity> financeEntities = financeResult.getResults();
-        List<KycData> kycDataList = kycResult.getResults();
+        List<Entity> financeEntities = financeResult.getResults();    // Each has a single Identifier
+        List<KycData> kycDataList = kycResult.getResults();           // Each has List<Identifier>
 
         return kycDataList.stream()
-                .flatMap(kycData -> kycData.getIdentifiers().stream()
+                .flatMap(kycData -> kycData.getIdentifiers().stream()   // Iterate over KYC identifiers
                         .flatMap(kycId -> financeEntities.stream()
                                 .filter(finEntity -> finEntity.getIdentifier() != null &&
-                                        finEntity.getIdentifier().getKycid().equals(kycId.getKycid()))
+                                        kycId.getKycid() != null &&
+                                        kycId.getKycid().equals(finEntity.getIdentifier().getKycid()))
                                 .map(finEntity -> new MergedResult(
                                         kycId.getKycid(),
                                         finEntity,
