@@ -9,6 +9,7 @@ import com.example.model.kyc.KycResult;
 import com.example.model.kyc.KycResultWrapper;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -22,9 +23,20 @@ public class MergerService {
     @Autowired
     private RestTemplate restTemplate;
 
+    @Value("${finance.api.url}")
+    private String financeApiUrl;
+
+    @Value("${kyc.api.url}")
+    private String kycApiUrl;
+
     public List<MergedResult> getMergedData() {
-        FinanceResult financeResult = restTemplate.getForObject("http://localhost:8081/finance", FinanceResult.class);
-        KycResultWrapper kycResultWrapper = restTemplate.getForObject("http://localhost:8082/kyc", KycResultWrapper.class);
+        FinanceResult financeResult = restTemplate.getForObject(financeApiUrl, FinanceResult.class);
+        KycResultWrapper kycResultWrapper = restTemplate.getForObject(kycApiUrl, KycResultWrapper.class);
+
+        if (financeResult == null || kycResultWrapper == null ||
+            financeResult.getResults() == null || kycResultWrapper.getResults() == null) {
+            return List.of(); // empty list if API fails
+        }
 
         List<FinanceEntity> financeEntities = financeResult.getResults();
         List<KycResult> kycResults = kycResultWrapper.getResults();
