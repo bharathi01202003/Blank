@@ -2,6 +2,7 @@ package org.example.service;
 
 import org.example.model.*;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
@@ -19,112 +20,111 @@ public class KycMergeService {
     @Autowired
     private RestTemplate restTemplate;
 
-    private static final String FINANCE_API_URL = "https://api.example.com/finance-data";
-    private static final String KYC_API_URL = "https://api.example.com/kyc-data";
+    @Value("${api.access.token}")
+    private String authToken;  // Injected from properties
+
+    @Value("${api.finance.url}")
+    private String financeApiUrl;  // From properties
+
+    @Value("${api.kyc.url}")
+    private String kycApiUrl;  // From properties
 
     @PostConstruct
-    public void disableSslVerification() {
+    public void disableSslValidation() {
         try {
-            // Create a trust manager that does not validate certificate chains
-            TrustManager[] trustAllCerts = new TrustManager[] {
-                new X509TrustManager() {
-                    public X509Certificate[] getAcceptedIssuers() {
-                        return null;
-                    }
-                    public void checkClientTrusted(X509Certificate[] certs, String authType) {
-                    }
-                    public void checkServerTrusted(X509Certificate[] certs, String authType) {
-                    }
-                }
-            };
-
-            // Install the all-trusting trust manager
-            SSLContext sc = SSLContext.getInstance("SSL");
-            sc.init(null, trustAllCerts, new java.security.SecureRandom());
-            HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
-
-            // Create all-trusting host name verifier
-            HostnameVerifier allHostsValid = (hostname, session) -> true;
-            HttpsURLConnection.setDefaultHostnameVerifier(allHostsValid);
-        } catch (NoSuchAlgorithmException | KeyManagementException e) {
-            e.printStackTrace();
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, getTrustAllCerts(), new java.security.SecureRandom());
+            HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.getSocketFactory());
+            HttpsURLConnection.setDefaultHostnameVerifier((hostname, session) -> true);
+        } catch (Exception e) {
+            System.err.println("SSL disabling failed: " + e.getMessage());
         }
     }
 
-    public List<MergedEntity> getMergedEntities(String authToken) {
-        // Configure headers with auth token
+    private TrustManager[] getTrustAllCerts() {
+        return new TrustManager[]{
+            new X509TrustManager() {
+                public X509Certificate[] getAcceptedIssuers() { return null; }
+                public void checkClientTrusted(X509Certificate[] certs, String authType) {}
+                public void checkServerTrusted(X509Certificate[] certs, String authType) {}
+            }
+        };
+    }
+
+    public List<MergedEntity> fetchAndMergeData() {
+        try {
+            File1Root financeData = fetchFromApi(financeApiUrl, File1Root.class);
+            File2Root kycData = fetchFromApi(kycApiUrl, File2Root.class);
+            
+            return mergeData(financeData, kycData);
+        } catch (Exception e) {
+            System.err.println("Failed to merge data: " + e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    private <T> T fetchFromApi(String url, Class<T> responseType) {
         HttpHeaders headers = new HttpHeaders();
         headers.set("Authorization", authToken);
-        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
-        
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
-        try {
-            // Fetch data from APIs (SSL will be bypassed)
-            ResponseEntity<File1Root> financeResponse = restTemplate.exchange(
-                FINANCE_API_URL, HttpMethod.GET, entity, File1Root.class);
-            
-            ResponseEntity<File2Root> kycResponse = restTemplate.exchange(
-                KYC_API_URL, HttpMethod.GET, entity, File2Root.class);
-
-            if (financeResponse.getStatusCode().is2xxSuccessful() && 
-                kycResponse.getStatusCode().is2xxSuccessful()) {
-                return mergeData(
-                    financeResponse.getBody(), 
-                    kycResponse.getBody()
-                );
-            }
-        } catch (Exception e) {
-            System.err.println("API request failed: " + e.getMessage());
-            e.printStackTrace();
-        }
+        ResponseEntity<T> response = restTemplate.exchange(
+            url, HttpMethod.GET, entity, responseType);
         
-        return Collections.emptyList();
+        if (!response.getStatusCode().is2xxSuccessful()) {
+            throw new RuntimeException("API request failed: " + response.getStatusCode());
+        }
+        return response.getBody();
     }
 
     private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
-        List<MergedEntity> mergedList = new ArrayList<>();
-
-        if (financeData == null || kycData == null || 
-            financeData.getResults() == null || kycData.getResults() == null) {
-            return mergedList;
+        if (financeData == null || kycData == null) {
+            return Collections.emptyList();
         }
 
-        financeData.getResults().stream()
-            .filter(f -> f != null && f.getEntity() != null && f.getEntity().getIdentifiers() != null)
-            .forEach(finance -> {
-                kycData.getResults().stream()
-                    .filter(k -> k != null && k.getIdentifiers() != null && !k.getIdentifiers().isEmpty())
-                    .filter(k -> finance.getEntity().getIdentifiers().getPtyId()
-                        .equals(k.getIdentifiers().get(0).getPtyId()))
-                    .findFirst()
-                    .ifPresent(kyc -> {
-                        MergedEntity merged = createMergedEntity(finance, kyc);
-                        if (merged != null) {
-                            mergedList.add(merged);
-                        }
-                    });
-            });
+        List<MergedEntity> mergedList = new ArrayList<>();
+        
+        financeData.getResults().forEach(finance -> {
+            if (isValidFinanceRecord(finance)) {
+                findMatchingKycRecord(kycData, finance)
+                    .ifPresent(kyc -> mergedList.add(createMergedEntity(finance, kyc)));
+            }
+        });
 
         return mergedList;
     }
 
+    private boolean isValidFinanceRecord(File1Result finance) {
+        return finance != null && 
+               finance.getEntity() != null && 
+               finance.getEntity().getIdentifiers() != null;
+    }
+
+    private Optional<File2Result> findMatchingKycRecord(File2Root kycData, File1Result finance) {
+        return kycData.getResults().stream()
+            .filter(this::isValidKycRecord)
+            .filter(kyc -> finance.getEntity().getIdentifiers().getPtyId()
+                .equals(kyc.getIdentifiers().get(0).getPtyId()))
+            .findFirst();
+    }
+
+    private boolean isValidKycRecord(File2Result kyc) {
+        return kyc != null && 
+               kyc.getIdentifiers() != null && 
+               !kyc.getIdentifiers().isEmpty();
+    }
+
     private MergedEntity createMergedEntity(File1Result finance, File2Result kyc) {
-        try {
-            MergedEntity entity = new MergedEntity();
-            entity.setIdentifiers(finance.getEntity().getIdentifiers());
-            entity.setBusinessAddress(finance.getEntity().getBusinessAddress());
-            
-            if (kyc.getKycData() != null) {
-                entity.setKyCsites(kyc.getKycData().getKyCsites());
-                entity.setKyCsegment(kyc.getKycData().getKyCsegment());
-                entity.setRiskIndustry(kyc.getKycData().getRiskIndustry());
-            }
-            
-            return entity;
-        } catch (Exception e) {
-            System.err.println("Error creating merged entity: " + e.getMessage());
-            return null;
+        MergedEntity merged = new MergedEntity();
+        merged.setIdentifiers(finance.getEntity().getIdentifiers());
+        merged.setBusinessAddress(finance.getEntity().getBusinessAddress());
+        
+        if (kyc.getKycData() != null) {
+            merged.setKyCsites(kyc.getKycData().getKyCsites());
+            merged.setKyCsegment(kyc.getKycData().getKyCsegment());
+            merged.setRiskIndustry(kyc.getKycData().getRiskIndustry());
         }
+        
+        return merged;
     }
 }
