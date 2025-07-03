@@ -1,151 +1,89 @@
 package org.example.service;
 
 import org.example.model.*;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
-import javax.annotation.PostConstruct;
-import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.stream.Collectors;
+import java.util.ArrayList;
+import java.util.List;
 
 @Service
 public class KycMergeService {
 
-    private final List<MergedEntity> mergedEntities = new CopyOnWriteArrayList<>();
-    private final RestTemplate restTemplate;
+    @Autowired
+    private RestTemplate restTemplate;
 
-    @Value("${finance.api.url}")
-    private String financeApiUrl;
+    public List<MergedEntity> mergeDataFromApis() {
+        List<MergedEntity> mergedList = new ArrayList<>();
 
-    @Value("${kyc.api.url}")
-    private String kycApiUrl;
-
-    public KycMergeService(RestTemplate restTemplate) {
-        this.restTemplate = restTemplate;
-    }
-
-    @PostConstruct
-    public void loadAndMergeData() {
         try {
-            // Load data from APIs
-            File1Root financeData = restTemplate.getForObject(financeApiUrl, File1Root.class);
-            File2Root kycData = restTemplate.getForObject(kycApiUrl, File2Root.class);
+            // Fetch data from finance API
+            String financeApiUrl = "https://api.example.com/finance";
+            File1Root file1Root = restTemplate.getForObject(financeApiUrl, File1Root.class);
+            
+            if (file1Root == null || file1Root.getResults() == null) {
+                System.out.println("Finance API returned null data");
+                return mergedList;
+            }
 
-            // Clear previous merged data
-            mergedEntities.clear();
+            // Fetch data from KYC API
+            String kycApiUrl = "https://api.example.com/kyc";
+            File2Root file2Root = restTemplate.getForObject(kycApiUrl, File2Root.class);
+            
+            if (file2Root == null || file2Root.getResults() == null) {
+                System.out.println("KYC API returned null data");
+                return mergedList;
+            }
 
             // Merge logic
-            if (financeData != null && kycData != null) {
-                financeData.getResults().forEach(financeResult -> {
-                    if (financeResult != null 
-                        && financeResult.getEntity() != null 
-                        && financeResult.getEntity().getIdentifiers() != null) {
-                            
-                        Integer financePtyId = financeResult.getEntity().getIdentifiers().getPtyId();
-                        
-                        kycData.getResults().stream()
-                            .filter(kycResult -> kycResult != null 
-                                && kycResult.getIdentifiers() != null 
-                                && !kycResult.getIdentifiers().isEmpty())
-                            .filter(kycResult -> kycResult.getIdentifiers().stream()
-                                .anyMatch(id -> financePtyId.equals(id.getPtyId())))
-                            .findFirst()
-                            .ifPresent(kycResult -> {
-                                MergedEntity merged = new MergedEntity();
-                                // Set identifiers from finance
-                                merged.setIdentifiers(financeResult.getEntity().getIdentifiers());
-                                // Set address from finance
-                                merged.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
-                                // Set KYC data if available
-                                if (kycResult.getKycData() != null) {
-                                    merged.setKyCsites(kycResult.getKycData().getKyCsites());
-                                    merged.setKyCsegment(kycResult.getKycData().getKyCsegment());
-                                    merged.setRiskIndustry(kycResult.getKycData().getRiskIndustry());
-                                }
-                                mergedEntities.add(merged);
-                            });
+            for (File1Result file1Result : file1Root.getResults()) {
+                try {
+                    if (file1Result.getEntity() == null || 
+                        file1Result.getEntity().getIdentifiers() == null) {
+                        continue;
                     }
-                });
+
+                    for (File2Result file2Result : file2Root.getResults()) {
+                        try {
+                            if (file2Result.getIdentifiers() == null || 
+                                file2Result.getIdentifiers().isEmpty()) {
+                                continue;
+                            }
+
+                            // Compare identifiers
+                            if (file1Result.getEntity().getIdentifiers().getPtyId()
+                                .equals(file2Result.getIdentifiers().get(0).getPtyId())) {
+                                
+                                MergedEntity merged = new MergedEntity();
+                                merged.setIdentifiers(file1Result.getEntity().getIdentifiers());
+                                merged.setBusinessAddress(file1Result.getEntity().getBusinessAddress());
+                                
+                                if (file2Result.getKycData() != null) {
+                                    merged.setKyCsites(file2Result.getKycData().getKyCsites());
+                                    merged.setKyCsegment(file2Result.getKycData().getKyCsegment());
+                                    merged.setRiskIndustry(file2Result.getKycData().getRiskIndustry());
+                                }
+                                
+                                mergedList.add(merged);
+                            }
+                        } catch (Exception e) {
+                            System.err.println("Error processing KYC record: " + e.getMessage());
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println("Error processing finance record: " + e.getMessage());
+                }
             }
+
+        } catch (RestClientException e) {
+            System.err.println("API call failed: " + e.getMessage());
+            // Optionally throw a custom exception or return error response
         } catch (Exception e) {
-            throw new RuntimeException("Failed to merge KYC data: " + e.getMessage(), e);
+            System.err.println("Unexpected error: " + e.getMessage());
         }
-    }
 
-    public List<MergedEntity> getAllMergedEntities() {
-        return Collections.unmodifiableList(mergedEntities);
-    }
-
-    public Optional<MergedEntity> getByPtyId(Integer ptyId) {
-        return mergedEntities.stream()
-            .filter(e -> e.getIdentifiers() != null && ptyId.equals(e.getIdentifiers().getPtyId()))
-            .findFirst();
-    }
-
-    public List<MergedEntity> getByRiskIndustryCode(String code) {
-        return mergedEntities.stream()
-            .filter(e -> e.getRiskIndustry() != null)
-            .filter(e -> e.getRiskIndustry().stream()
-                .anyMatch(ri -> code.equals(ri.getIndustryCode())))
-            .collect(Collectors.toList());
-    }
-
-    public List<MergedEntity> getByFreezeFlag(boolean frozen) {
-        return mergedEntities.stream()
-            .filter(e -> e.getKyCsites() != null)
-            .filter(e -> e.getKyCsites().stream()
-                .anyMatch(site -> site.getSiteAssetFreezeFlag() != null 
-                    && site.getSiteAssetFreezeFlag() == frozen))
-            .collect(Collectors.toList());
-    }
-}
-package org.example.controller;
-
-import org.example.model.MergedEntity;
-import org.example.service.KycMergeService;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-
-import java.util.List;
-import java.util.Optional;
-
-@RestController
-@RequestMapping("/kyc")
-public class KycController {
-
-    private final KycMergeService kycMergeService;
-
-    public KycController(KycMergeService kycMergeService) {
-        this.kycMergeService = kycMergeService;
-    }
-
-    @GetMapping("/entities")
-    public List<MergedEntity> getAllEntities() {
-        return kycMergeService.getAllMergedEntities();
-    }
-
-    @GetMapping("/entity")
-    public ResponseEntity<MergedEntity> getByPtyId(@RequestParam Integer ptyId) {
-        Optional<MergedEntity> entity = kycMergeService.getByPtyId(ptyId);
-        return entity.map(ResponseEntity::ok)
-                    .orElse(ResponseEntity.notFound().build());
-    }
-
-    @GetMapping("/risk")
-    public List<MergedEntity> getByRisk(@RequestParam String industryCode) {
-        return kycMergeService.getByRiskIndustryCode(industryCode);
-    }
-
-    @GetMapping("/freeze")
-    public List<MergedEntity> getByFreezeStatus(@RequestParam boolean frozen) {
-        return kycMergeService.getByFreezeFlag(frozen);
-    }
-
-    @PostMapping("/refresh")
-    public String refreshData() {
-        kycMergeService.loadAndMergeData();
-        return "Data refreshed successfully";
+        return mergedList;
     }
 }
