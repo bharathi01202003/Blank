@@ -3,87 +3,103 @@ package org.example.service;
 import org.example.model.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
-
-import java.util.ArrayList;
-import java.util.List;
+import org.springframework.http.ResponseEntity;
+import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 public class KycMergeService {
 
     @Autowired
     private RestTemplate restTemplate;
+    
+    private static final String FINANCE_API_URL = "https://api.example.com/finance-data";
+    private static final String KYC_API_URL = "https://api.example.com/kyc-data";
 
     public List<MergedEntity> mergeDataFromApis() {
         List<MergedEntity> mergedList = new ArrayList<>();
-
+        
         try {
-            // Fetch data from finance API
-            String financeApiUrl = "https://api.example.com/finance";
-            File1Root file1Root = restTemplate.getForObject(financeApiUrl, File1Root.class);
+            // Fetch and validate finance data
+            ResponseEntity<File1Root> financeResponse = restTemplate.getForEntity(
+                FINANCE_API_URL, File1Root.class);
             
-            if (file1Root == null || file1Root.getResults() == null) {
-                System.out.println("Finance API returned null data");
+            if (financeResponse.getStatusCode().isError() || financeResponse.getBody() == null) {
+                throw new RuntimeException("Failed to fetch finance data");
+            }
+            
+            File1Root file1Root = financeResponse.getBody();
+            if (file1Root.getResults() == null || file1Root.getResults().isEmpty()) {
                 return mergedList;
             }
 
-            // Fetch data from KYC API
-            String kycApiUrl = "https://api.example.com/kyc";
-            File2Root file2Root = restTemplate.getForObject(kycApiUrl, File2Root.class);
+            // Fetch and validate KYC data
+            ResponseEntity<File2Root> kycResponse = restTemplate.getForEntity(
+                KYC_API_URL, File2Root.class);
             
-            if (file2Root == null || file2Root.getResults() == null) {
-                System.out.println("KYC API returned null data");
+            if (kycResponse.getStatusCode().isError() || kycResponse.getBody() == null) {
+                throw new RuntimeException("Failed to fetch KYC data");
+            }
+            
+            File2Root file2Root = kycResponse.getBody();
+            if (file2Root.getResults() == null || file2Root.getResults().isEmpty()) {
                 return mergedList;
             }
 
-            // Merge logic
+            // Merge data with null checks
             for (File1Result file1Result : file1Root.getResults()) {
-                try {
-                    if (file1Result.getEntity() == null || 
-                        file1Result.getEntity().getIdentifiers() == null) {
+                if (file1Result == null || file1Result.getEntity() == null || 
+                    file1Result.getEntity().getIdentifiers() == null) {
+                    continue;
+                }
+
+                for (File2Result file2Result : file2Root.getResults()) {
+                    if (file2Result == null || file2Result.getIdentifiers() == null || 
+                        file2Result.getIdentifiers().isEmpty()) {
                         continue;
                     }
 
-                    for (File2Result file2Result : file2Root.getResults()) {
-                        try {
-                            if (file2Result.getIdentifiers() == null || 
-                                file2Result.getIdentifiers().isEmpty()) {
-                                continue;
-                            }
-
-                            // Compare identifiers
-                            if (file1Result.getEntity().getIdentifiers().getPtyId()
-                                .equals(file2Result.getIdentifiers().get(0).getPtyId())) {
-                                
-                                MergedEntity merged = new MergedEntity();
-                                merged.setIdentifiers(file1Result.getEntity().getIdentifiers());
-                                merged.setBusinessAddress(file1Result.getEntity().getBusinessAddress());
-                                
-                                if (file2Result.getKycData() != null) {
-                                    merged.setKyCsites(file2Result.getKycData().getKyCsites());
-                                    merged.setKyCsegment(file2Result.getKycData().getKyCsegment());
-                                    merged.setRiskIndustry(file2Result.getKycData().getRiskIndustry());
-                                }
-                                
-                                mergedList.add(merged);
-                            }
-                        } catch (Exception e) {
-                            System.err.println("Error processing KYC record: " + e.getMessage());
+                    if (matchesById(file1Result, file2Result)) {
+                        MergedEntity merged = createMergedEntity(file1Result, file2Result);
+                        if (merged != null) {
+                            mergedList.add(merged);
                         }
                     }
-                } catch (Exception e) {
-                    System.err.println("Error processing finance record: " + e.getMessage());
                 }
             }
-
-        } catch (RestClientException e) {
-            System.err.println("API call failed: " + e.getMessage());
-            // Optionally throw a custom exception or return error response
+            
         } catch (Exception e) {
-            System.err.println("Unexpected error: " + e.getMessage());
+            // Log the error
+            System.err.println("Error merging data: " + e.getMessage());
         }
-
+        
         return mergedList;
+    }
+
+    private boolean matchesById(File1Result file1Result, File2Result file2Result) {
+        return file1Result.getEntity().getIdentifiers().getPtyId()
+            .equals(file2Result.getIdentifiers().get(0).getPtyId());
+    }
+
+    private MergedEntity createMergedEntity(File1Result file1Result, File2Result file2Result) {
+        try {
+            MergedEntity merged = new MergedEntity();
+            merged.setIdentifiers(file1Result.getEntity().getIdentifiers());
+            merged.setBusinessAddress(file1Result.getEntity().getBusinessAddress());
+            
+            if (file2Result.getKycData() != null) {
+                merged.setKyCsites(Optional.ofNullable(file2Result.getKycData().getKyCsites())
+                    .orElse(Collections.emptyList()));
+                merged.setKyCsegment(file2Result.getKycData().getKyCsegment());
+                merged.setRiskIndustry(Optional.ofNullable(file2Result.getKycData().getRiskIndustry())
+                    .orElse(Collections.emptyList()));
+            }
+            
+            return merged;
+        } catch (Exception e) {
+            System.err.println("Error creating merged entity: " + e.getMessage());
+            return null;
+        }
     }
 }
