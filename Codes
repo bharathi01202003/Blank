@@ -1,20 +1,23 @@
 package com.example.service;
 
 import com.example.model.*;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import javax.annotation.PostConstruct;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
-import java.util.stream.Collectors;
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 
+@Slf4j
 @Service
+@RequiredArgsConstructor
 public class KycMergeService {
-    private final List<MergedEntity> mergedEntities = new ArrayList<>();
+
     private final RestTemplate restTemplate;
+    private final List<MergedEntity> mergedEntities = new CopyOnWriteArrayList<>();
 
     @Value("${finance.api.url}")
     private String financeApiUrl;
@@ -22,59 +25,68 @@ public class KycMergeService {
     @Value("${kyc.api.url}")
     private String kycApiUrl;
 
-    public KycMergeService(RestTemplate restTemplate) {
-        this.restTemplate = restTemplate;
-    }
-
     @PostConstruct
-    public void init() {
-        mergeData();
-    }
+    public void loadAndMergeData() {
+        try {
+            File1Root financeData = restTemplate.getForObject(financeApiUrl, File1Root.class);
+            File2Root kycData = restTemplate.getForObject(kycApiUrl, File2Root.class);
 
-    private void mergeData() {
-        File1Root financeData = restTemplate.getForObject(financeApiUrl, File1Root.class);
-        File2Root kycData = restTemplate.getForObject(kycApiUrl, File2Root.class);
+            if (financeData == null || kycData == null) {
+                log.error("Failed to fetch data: one or both APIs returned null");
+                return;
+            }
 
-        if (financeData != null && kycData != null) {
-            mergedEntities.addAll(
-                financeData.getResults().stream()
-                    .flatMap(financeResult -> kycData.getResults().stream()
-                        .filter(kycResult -> matchIdentifiers(financeResult, kycResult))
-                        .map(kycResult -> createMergedEntity(financeResult, kycResult))
-                    )
-                    .collect(Collectors.toList())
-            );
+            mergedEntities.clear();
+
+            financeData.getResults().forEach(financeResult -> {
+                if (financeResult != null && financeResult.getEntity() != null) {
+                    kycData.getResults().stream()
+                        .filter(Objects::nonNull)
+                        .filter(kycResult -> kycResult.getIdentifiers() != null && !kycResult.getIdentifiers().isEmpty())
+                        .filter(kycResult -> financeResult.getEntity().getIdentifiers() != null)
+                        .filter(kycResult -> kycResult.getIdentifiers().get(0).getPtyId()
+                                .equals(financeResult.getEntity().getIdentifiers().getPtyId()))
+                        .findFirst()
+                        .ifPresent(kycResult -> mergedEntities.add(createMergedEntity(financeResult, kycResult)));
+                }
+            });
+            
+            log.info("Successfully merged {} entities", mergedEntities.size());
+        } catch (Exception e) {
+            log.error("Error during data merging: {}", e.getMessage(), e);
         }
-    }
-
-    private boolean matchIdentifiers(File1Result financeResult, File2Result kycResult) {
-        return financeResult.getEntity().getIdentifiers().getPtyId()
-            .equals(kycResult.getIdentifiers().get(0).getPtyId());
     }
 
     private MergedEntity createMergedEntity(File1Result financeResult, File2Result kycResult) {
         MergedEntity merged = new MergedEntity();
         merged.setIdentifiers(financeResult.getEntity().getIdentifiers());
         merged.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
-        merged.setKyCsites(kycResult.getKycData().getKyCsites());
-        merged.setKyCsegment(kycResult.getKycData().getKyCsegment());
-        merged.setRiskIndustry(kycResult.getKycData().getRiskIndustry());
+        
+        if (kycResult.getKycData() != null) {
+            merged.setKyCsites(kycResult.getKycData().getKyCsites());
+            merged.setKyCsegment(kycResult.getKycData().getKyCsegment());
+            merged.setRiskIndustry(kycResult.getKycData().getRiskIndustry());
+        }
+        
         return merged;
     }
 
     public List<MergedEntity> getAllMergedEntities() {
-        return new ArrayList<>(mergedEntities);
+        return Collections.unmodifiableList(mergedEntities);
     }
 
     public Optional<MergedEntity> getEntityByIdentifier(String ptyId) {
         return mergedEntities.stream()
-            .filter(me -> me.getIdentifiers().getPtyId().equals(ptyId))
+            .filter(entity -> entity.getIdentifiers() != null && 
+                   ptyId.equals(entity.getIdentifiers().getPtyId()))
             .findFirst();
     }
 
     public List<MergedEntity> getEntitiesByRiskLevel(String riskLevel) {
         return mergedEntities.stream()
-            .filter(me -> me.getRiskIndustry().getLevel().equalsIgnoreCase(riskLevel))
-            .collect(Collectors.toList());
+            .filter(entity -> entity.getRiskIndustry() != null &&
+                   entity.getRiskIndustry().stream()
+                       .anyMatch(ri -> ri != null && riskLevel.equalsIgnoreCase(ri.getRiskLevel())))
+            .toList();
     }
 }
