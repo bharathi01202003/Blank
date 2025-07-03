@@ -1,3 +1,105 @@
+package org.example.service;
+
+import org.example.model.*;
+import org.springframework.stereotype.Service;
+
+import javax.annotation.PostConstruct;
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.stream.Collectors;
+
+@Service
+public class KycMergeService {
+
+    private final List<MergedEntity> mergedEntities = new CopyOnWriteArrayList<>();
+
+    // Sample data for finance and KYC
+    private List<File1Result> financeData;
+    private List<File2Result> kycData;
+
+    @PostConstruct
+    public void loadAndMergeData() {
+        // Simulated finance data
+        financeData = new ArrayList<>();
+        financeData.add(createSampleFinanceData("123", "Company A", "City A", "Country A", "Line 1", "Line 2", "12345", "State A"));
+        financeData.add(createSampleFinanceData("456", "Company B", "City B", "Country B", "Line 1", "Line 2", "67890", "State B"));
+
+        // Simulated KYC data
+        kycData = new ArrayList<>();
+        kycData.add(createSampleKycData("123", "Segment A", true));
+        kycData.add(createSampleKycData("456", "Segment B", false));
+
+        // Clear previous merged data
+        mergedEntities.clear();
+
+        // Merge logic
+        financeData.forEach(financeResult -> {
+            String financePtyId = financeResult.getEntity().getIdentifiers().getPtyId();
+            kycData.stream()
+                .filter(kycResult -> kycResult.getIdentifiers().stream()
+                    .anyMatch(id -> financePtyId.equals(id.getPtyId())))
+                .findFirst()
+                .ifPresent(kycResult -> {
+                    MergedEntity merged = new MergedEntity();
+                    // Set identifiers from finance
+                    merged.setIdentifiers(financeResult.getEntity().getIdentifiers());
+                    // Set address from finance
+                    merged.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
+                    // Set KYC data if available
+                    if (kycResult.getKycData() != null) {
+                        merged.setKyCsites(kycResult.getKycData().getKyCsites());
+                        merged.setKyCsegment(kycResult.getKycData().getKyCsegment());
+                        merged.setRiskIndustry(kycResult.getKycData().getRiskIndustry());
+                    }
+                    mergedEntities.add(merged);
+                });
+        });
+    }
+
+    private File1Result createSampleFinanceData(String ptyId, String companyName, String city, String country, String line1, String line2, String zipCode, String state) {
+        Identifiers identifiers = new Identifiers(ptyId, 1, Integer.parseInt(ptyId));
+        BusinessAddress address = new BusinessAddress(city, country, line1, line2, zipCode, state);
+        Entity entity = new Entity(identifiers, address);
+        return new File1Result(entity);
+    }
+
+    private File2Result createSampleKycData(String ptyId, String segment, boolean freezeFlag) {
+        Identifiers identifiers = new Identifiers(ptyId, 1, Integer.parseInt(ptyId));
+        KycSites site = new KycSites("Relationship Type", "Site Entity", "Site Bnpp Entity", "Site Country", "Active", "Site Pole", "2023-01-01", "Site Role", freezeFlag);
+        KycData kycData = new KycData(Collections.singletonList(site), segment, Collections.emptyList());
+        return new File2Result(Collections.singletonList(identifiers), kycData);
+    }
+
+    public List<MergedEntity> getAllMergedEntities() {
+        return Collections.unmodifiableList(mergedEntities);
+    }
+
+    public Optional<MergedEntity> getByPtyId(Integer ptyId) {
+        return mergedEntities.stream()
+            .filter(e -> e.getIdentifiers() != null && ptyId.equals(e.getIdentifiers().getPtyId()))
+            .findFirst();
+    }
+
+    public List<MergedEntity> getByRiskIndustryCode(String code) {
+        return mergedEntities.stream()
+            .filter(e -> e.getRiskIndustry() != null)
+            .filter(e -> e.getRiskIndustry().stream()
+                .anyMatch(ri -> code.equals(ri.getIndustryCode())))
+            .collect(Collectors.toList());
+    }
+
+    public List<MergedEntity> getByFreezeFlag(boolean frozen) {
+        return mergedEntities.stream()
+            .filter(e -> e.getKyCsites() != null)
+            .filter(e -> e.getKyCsites().stream()
+                .anyMatch(site -> site.getSiteAssetFreezeFlag() != null 
+                    && site.getSiteAssetFreezeFlag() == frozen))
+            .collect(Collectors.toList());
+    }
+}
+
+
+
 package org.example.controller;
 
 import org.example.model.MergedEntity;
@@ -46,3 +148,4 @@ public class KycController {
         return "Data refreshed successfully";
     }
 }
+
