@@ -1,103 +1,48 @@
-package org.example.service;
+package org.example.controller;
 
-import org.example.model.*;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
+import org.example.model.MergedEntity;
+import org.example.service.KycMergeService;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
 
-import javax.annotation.PostConstruct;
-import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.stream.Collectors;
+import java.util.List;
+import java.util.Optional;
 
-@Service
-public class KycMergeService {
+@RestController
+@RequestMapping("/kyc")
+public class KycController {
 
-    private final List<MergedEntity> mergedEntities = new CopyOnWriteArrayList<>();
-    private final RestTemplate restTemplate;
+    private final KycMergeService kycMergeService;
 
-    @Value("${finance.api.url}")
-    private String financeApiUrl;
-
-    @Value("${kyc.api.url}")
-    private String kycApiUrl;
-
-    public KycMergeService(RestTemplate restTemplate) {
-        this.restTemplate = restTemplate;
+    public KycController(KycMergeService kycMergeService) {
+        this.kycMergeService = kycMergeService;
     }
 
-    @PostConstruct
-    public void loadAndMergeData() {
-        try {
-            // Load data from APIs
-            File1Root financeData = restTemplate.getForObject(financeApiUrl, File1Root.class);
-            File2Root kycData = restTemplate.getForObject(kycApiUrl, File2Root.class);
-
-            // Clear previous merged data
-            mergedEntities.clear();
-
-            // Merge logic
-            if (financeData != null && kycData != null) {
-                financeData.getResults().forEach(financeResult -> {
-                    if (financeResult != null 
-                        && financeResult.getEntity() != null 
-                        && financeResult.getEntity().getIdentifiers() != null) {
-                            
-                        Integer financePtyId = financeResult.getEntity().getIdentifiers().getPtyId();
-                        
-                        kycData.getResults().stream()
-                            .filter(kycResult -> kycResult != null 
-                                && kycResult.getIdentifiers() != null 
-                                && !kycResult.getIdentifiers().isEmpty())
-                            .filter(kycResult -> kycResult.getIdentifiers().stream()
-                                .anyMatch(id -> financePtyId.equals(id.getPtyId())))
-                            .findFirst()
-                            .ifPresent(kycResult -> {
-                                MergedEntity merged = new MergedEntity();
-                                // Set identifiers from finance
-                                merged.setIdentifiers(financeResult.getEntity().getIdentifiers());
-                                // Set address from finance
-                                merged.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
-                                // Set KYC data if available
-                                if (kycResult.getKycData() != null) {
-                                    merged.setKyCsites(kycResult.getKycData().getKyCsites());
-                                    merged.setKyCsegment(kycResult.getKycData().getKyCsegment());
-                                    merged.setRiskIndustry(kycResult.getKycData().getRiskIndustry());
-                                }
-                                mergedEntities.add(merged);
-                            });
-                    }
-                });
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to merge KYC data: " + e.getMessage(), e);
-        }
+    @GetMapping("/entities")
+    public List<MergedEntity> getAllEntities() {
+        return kycMergeService.getAllMergedEntities();
     }
 
-    public List<MergedEntity> getAllMergedEntities() {
-        return Collections.unmodifiableList(mergedEntities);
+    @GetMapping("/entity")
+    public ResponseEntity<MergedEntity> getByPtyId(@RequestParam Integer ptyId) {
+        Optional<MergedEntity> entity = kycMergeService.getByPtyId(ptyId);
+        return entity.map(ResponseEntity::ok)
+                    .orElse(ResponseEntity.notFound().build());
     }
 
-    public Optional<MergedEntity> getByPtyId(Integer ptyId) {
-        return mergedEntities.stream()
-            .filter(e -> e.getIdentifiers() != null && ptyId.equals(e.getIdentifiers().getPtyId()))
-            .findFirst();
+    @GetMapping("/risk")
+    public List<MergedEntity> getByRisk(@RequestParam String industryCode) {
+        return kycMergeService.getByRiskIndustryCode(industryCode);
     }
 
-    public List<MergedEntity> getByRiskIndustryCode(String code) {
-        return mergedEntities.stream()
-            .filter(e -> e.getRiskIndustry() != null)
-            .filter(e -> e.getRiskIndustry().stream()
-                .anyMatch(ri -> code.equals(ri.getIndustryCode())))
-            .collect(Collectors.toList());
+    @GetMapping("/freeze")
+    public List<MergedEntity> getByFreezeStatus(@RequestParam boolean frozen) {
+        return kycMergeService.getByFreezeFlag(frozen);
     }
 
-    public List<MergedEntity> getByFreezeFlag(boolean frozen) {
-        return mergedEntities.stream()
-            .filter(e -> e.getKyCsites() != null)
-            .filter(e -> e.getKyCsites().stream()
-                .anyMatch(site -> site.getSiteAssetFreezeFlag() != null 
-                    && site.getSiteAssetFreezeFlag() == frozen))
-            .collect(Collectors.toList());
+    @PostMapping("/refresh")
+    public String refreshData() {
+        kycMergeService.loadAndMergeData();
+        return "Data refreshed successfully";
     }
 }
