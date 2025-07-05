@@ -11,45 +11,50 @@ import java.util.stream.Collectors;
 public class DataService {
 
     @Value("${finance.api.url}")
-    private final String financeApiUrl;
+    private String financeApiUrl;
 
     @Value("${kyc.api.url}")
-    private final String kycApiUrl;
+    private String kycApiUrl;
 
     private final RestTemplate restTemplate;
 
     public ResultObject fetchCombinedData(String accessToken) {
-        // 1. Fetch finance data
+        // 1. Fetch and validate API responses
         FinanceResponse financeResponse = restTemplate.getForObject(
-            financeApiUrl, 
+            financeApiUrl,
             FinanceResponse.class
         );
 
-        // 2. Fetch KYC data
         KycResponse kycResponse = restTemplate.getForObject(
-            kycApiUrl, 
+            kycApiUrl,
             KycResponse.class
         );
 
-        // 3. Combine data using Stream API
+        if (financeResponse == null || kycResponse == null || kycResponse.getResults() == null) {
+            throw new RuntimeException("Failed to retrieve API responses");
+        }
+
+        // 2. Assuming we want to process the first KycEntity in the results
+        KycEntity kycEntity = kycResponse.getResults().get(0); // Adjust as needed
+
+        // 3. Map the common identifier (assuming kycid is the common field)
+        String commonIdentifier = financeResponse.getEntity().getIdentifiers().getKycid();
+
+        // 4. Filter KYC segments
+        List<KycSegment> filteredSegments = kycEntity.getKycData().getKycSegments()
+            .stream()
+            .filter(segment -> segment.getId().equals(commonIdentifier))
+            .collect(Collectors.toList());
+
+        // 5. Build the result object
         return ResultObject.builder()
-            .identifier(financeResponse.getEntity().getIdentifier())
+            .identifier(financeResponse.getEntity().getIdentifiers())
             .businessAddress(financeResponse.getEntity().getBusinessAddress())
             .kycData(KycData.builder()
-                .kycSegments(filterKycSegments(
-                    kycResponse.getEntity().getKycData().getKycSegments(),
-                    kycResponse.getEntity().getIdentifiers()
-                ))
-                .kycSites(kycResponse.getEntity().getKycData().getKycSites())
-                .riskIndustries(kycResponse.getEntity().getKycData().getRiskIndustries())
+                .kycSegments(filteredSegments)
+                .kycSites(kycEntity.getKycData().getKycSites())
+                .riskIndustries(kycEntity.getKycData().getRiskIndustries())
                 .build())
             .build();
-    }
-
-    private List<KycSegment> filterKycSegments(List<KycSegment> segments, List<Identifier> identifiers) {
-        return segments.stream()
-            .filter(segment -> identifiers.stream()
-                .anyMatch(id -> id.getId().equals(segment.getId())))
-            .collect(Collectors.toList());
     }
 }
