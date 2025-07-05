@@ -1,50 +1,55 @@
+import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.stream.Collectors;
 
 @Service
+@RequiredArgsConstructor
 public class DataService {
 
     @Value("${finance.api.url}")
-    private String financeApiUrl;
+    private final String financeApiUrl;
 
     @Value("${kyc.api.url}")
-    private String kycApiUrl;
+    private final String kycApiUrl;
 
     private final RestTemplate restTemplate;
 
-    public DataService(RestTemplate restTemplate) {
-        this.restTemplate = restTemplate;
+    public ResultObject fetchCombinedData(String accessToken) {
+        // 1. Fetch finance data
+        FinanceResponse financeResponse = restTemplate.getForObject(
+            financeApiUrl, 
+            FinanceResponse.class
+        );
+
+        // 2. Fetch KYC data
+        KycResponse kycResponse = restTemplate.getForObject(
+            kycApiUrl, 
+            KycResponse.class
+        );
+
+        // 3. Combine data using Stream API
+        return ResultObject.builder()
+            .identifier(financeResponse.getEntity().getIdentifier())
+            .businessAddress(financeResponse.getEntity().getBusinessAddress())
+            .kycData(KycData.builder()
+                .kycSegments(filterKycSegments(
+                    kycResponse.getEntity().getKycData().getKycSegments(),
+                    kycResponse.getEntity().getIdentifiers()
+                ))
+                .kycSites(kycResponse.getEntity().getKycData().getKycSites())
+                .riskIndustries(kycResponse.getEntity().getKycData().getRiskIndustries())
+                .build())
+            .build();
     }
 
-    public ResultObject fetchData(String accessToken) {
-        // Fetch data from Finance API
-        FinanceResponse financeResponse = restTemplate.getForObject(financeApiUrl, FinanceResponse.class);
-        Identifiers identifier = financeResponse.getEntity().getIdentifier(); // Single Identifiers object
-        BusinessAddress businessAddress = financeResponse.getEntity().getBusinessAddress();
-
-        // Fetch data from KYC API using the common identifier
-        KycResponse kycResponse = restTemplate.getForObject(kycApiUrl, KycResponse.class);
-        List<Identifier> kycIdentifiers = kycResponse.getEntity().getIdentifiers();
-
-        // Use Stream API to filter and collect data
-        KycData kycData = new KycData();
-        kycData.setKycSegments(kycResponse.getEntity().getKycData().getKycSegments().stream()
-            .filter(segment -> kycIdentifiers.stream().anyMatch(id -> id.getId().equals(segment.getId()))) // Assuming segment has an ID
-            .collect(Collectors.toList()));
-        kycData.setKycSites(kycResponse.getEntity().getKycData().getKycSites());
-        kycData.setRiskIndustries(kycResponse.getEntity().getKycData().getRiskIndustries());
-
-        // Create ResultObject
-        ResultObject resultObject = new ResultObject();
-        resultObject.setIdentifier(identifier); // Set Identifiers object
-        resultObject.setBusinessAddress(businessAddress);
-        resultObject.setKycData(kycData);
-
-        return resultObject;
+    private List<KycSegment> filterKycSegments(List<KycSegment> segments, List<Identifier> identifiers) {
+        return segments.stream()
+            .filter(segment -> identifiers.stream()
+                .anyMatch(id -> id.getId().equals(segment.getId())))
+            .collect(Collectors.toList());
     }
 }
