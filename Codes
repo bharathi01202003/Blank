@@ -1,117 +1,50 @@
-package org.example.service;
-
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.example.model.*;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.*;
+import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 
 @Service
 public class DataService {
 
-    private final RestTemplate restTemplate;
-    private final ObjectMapper mapper;
+    @Value("${finance.api.url}")
+    private String financeApiUrl;
 
-    @Value("${api.financech.url}")
-    private String financeChUrl;
+    @Value("${kyc.api.url}")
+    private String kycApiUrl;
 
-    @Value("${api.kyc.url}")
-    private String kycUrl;
+    private final RestTemplate restTemplate;
 
-    @Value("${api.token}")
-    private String token;
+    public DataService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
+    }
 
-    public DataService(RestTemplate restTemplate) {
-        this.restTemplate = restTemplate;
-        this.mapper = new ObjectMapper();
-    }
+    public ResultObject fetchData(String accessToken) {
+        // Fetch data from Finance API
+        FinanceResponse financeResponse = restTemplate.getForObject(financeApiUrl, FinanceResponse.class);
+        Identifiers identifier = financeResponse.getEntity().getIdentifier(); // Single Identifiers object
+        BusinessAddress businessAddress = financeResponse.getEntity().getBusinessAddress();
 
-    public List<MergedEntity> getMergedEntities() {
-        List<MergedEntity> mergedList = new ArrayList<>();
+        // Fetch data from KYC API using the common identifier
+        KycResponse kycResponse = restTemplate.getForObject(kycApiUrl, KycResponse.class);
+        List<Identifier> kycIdentifiers = kycResponse.getEntity().getIdentifiers();
 
-        try {
-            // Setup headers
-            HttpHeaders headers = new HttpHeaders();
-            headers.setBearerAuth(token);
-            headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
-            HttpEntity<String> request = new HttpEntity<>(headers);
+        // Use Stream API to filter and collect data
+        KycData kycData = new KycData();
+        kycData.setKycSegments(kycResponse.getEntity().getKycData().getKycSegments().stream()
+            .filter(segment -> kycIdentifiers.stream().anyMatch(id -> id.getId().equals(segment.getId()))) // Assuming segment has an ID
+            .collect(Collectors.toList()));
+        kycData.setKycSites(kycResponse.getEntity().getKycData().getKycSites());
+        kycData.setRiskIndustries(kycResponse.getEntity().getKycData().getRiskIndustries());
 
-            // Fetch FinanceCH data
-            ResponseEntity<String> financeResponse = restTemplate.exchange(financeChUrl, HttpMethod.GET, request, String.class);
-            JsonNode financeRoot = mapper.readTree(financeResponse.getBody());
-            JsonNode financeResults = financeRoot.path("results");
+        // Create ResultObject
+        ResultObject resultObject = new ResultObject();
+        resultObject.setIdentifier(identifier); // Set Identifiers object
+        resultObject.setBusinessAddress(businessAddress);
+        resultObject.setKycData(kycData);
 
-            // Fetch KYC data
-            ResponseEntity<String> kycResponse = restTemplate.exchange(kycUrl, HttpMethod.GET, request, String.class);
-            JsonNode kycRoot = mapper.readTree(kycResponse.getBody());
-            JsonNode kycResults = kycRoot.path("results");
-
-            // Build a map of ptyId -> kycData
-            Map<String, JsonNode> kycMap = new HashMap<>();
-            for (JsonNode kycResult : kycResults) {
-                JsonNode identifiersNode = kycResult.path("identifiers");
-                if (identifiersNode.isArray() && identifiersNode.size() > 0) {
-                    Identifiers identifiers = mapper.convertValue(identifiersNode.get(0), Identifiers.class);
-                    kycMap.put(identifiers.getPtyId(), kycResult.path("kycData"));
-                }
-            }
-
-            // Iterate over FinanceCH results
-            for (JsonNode financeResult : financeResults) {
-                JsonNode entityNode = financeResult.path("entity");
-                if (entityNode.isMissingNode()) continue;
-
-                Identifiers identifiers = mapper.convertValue(entityNode.path("identifiers"), Identifiers.class);
-                String ptyId = identifiers.getPtyId();
-
-                // Match only if KYC data also available for same ptyId
-                if (kycMap.containsKey(ptyId)) {
-                    MergedEntity merged = new MergedEntity();
-                    merged.setIdentifiers(identifiers);
-
-                    // Map radixData
-                    List<RadixData> radixDataList = Optional.ofNullable(financeResult.path("radixData"))
-                            .filter(JsonNode::isArray)
-                            .map(array -> StreamSupport.stream(array.spliterator(), false)
-                                    .map(node -> mapper.convertValue(node, RadixData.class))
-                                    .collect(Collectors.toList()))
-                            .orElse(Collections.emptyList());
-                    merged.setRadixData(radixDataList);
-
-                    // Map KYC fields
-                    JsonNode kycData = kycMap.get(ptyId);
-
-                    Optional.ofNullable(kycData.get("kycSites"))
-                            .filter(JsonNode::isArray)
-                            .map(node -> mapper.convertValue(node, new TypeReference<List<KycSites>>() {}))
-                            .ifPresent(merged::setKycSites);
-
-                    Optional.ofNullable(kycData.get("kycSegment"))
-                            .filter(JsonNode::isTextual)
-                            .map(JsonNode::asText)
-                            .ifPresent(merged::setKycSegments);
-
-                    Optional.ofNullable(kycData.get("riskIndustry"))
-                            .filter(JsonNode::isArray)
-                            .map(node -> mapper.convertValue(node, new TypeReference<List<RiskIndustry>>() {}))
-                            .ifPresent(merged::setRiskIndustry);
-
-                    mergedList.add(merged);
-                }
-            }
-
-        } catch (Exception e) {
-            System.err.println("Error retrieving merged entities: " + e.getMessage());
-            e.printStackTrace();
-        }
-
-        return mergedList;
-    }
+        return resultObject;
+    }
 }
