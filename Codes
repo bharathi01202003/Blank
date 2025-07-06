@@ -1,60 +1,80 @@
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
+package com.example.service;
+
+import com.example.model.FinanceWrapper;
+import com.example.model.KycWrapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.List;
-import java.util.stream.Collectors;
-
 @Service
-@RequiredArgsConstructor
-public class DataService {
-
-    @Value("${finance.api.url}")
-    private String financeApiUrl;
-
-    @Value("${kyc.api.url}")
-    private String kycApiUrl;
+public class ApiFetchService {
 
     private final RestTemplate restTemplate;
+    private final ObjectMapper objectMapper;
 
-    public ResultObject fetchCombinedData(String accessToken) {
-        // 1. Fetch and validate API responses
-        FinanceResponse financeResponse = restTemplate.getForObject(
-            financeApiUrl,
-            FinanceResponse.class
-        );
+    public ApiFetchService() {
+        this.restTemplate = new RestTemplate();
+        this.objectMapper = new ObjectMapper();
+    }
 
-        KycResponse kycResponse = restTemplate.getForObject(
-            kycApiUrl,
-            KycResponse.class
-        );
+    public FinanceWrapper fetchFinanceData(String url) {
+        try {
+            String response = restTemplate.getForObject(url, String.class);
+            return objectMapper.readValue(response, FinanceWrapper.class);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
 
-        if (financeResponse == null || kycResponse == null || kycResponse.getResults() == null) {
-            throw new RuntimeException("Failed to retrieve API responses");
+    public KycWrapper fetchKycData(String url) {
+        try {
+            String response = restTemplate.getForObject(url, String.class);
+            return objectMapper.readValue(response, KycWrapper.class);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+}
+
+
+package com.example;
+
+import com.example.model.FinanceWrapper;
+import com.example.model.KycWrapper;
+import com.example.service.ApiFetchService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class MainApp implements CommandLineRunner {
+
+    @Autowired
+    private ApiFetchService apiFetchService;
+
+    public static void main(String[] args) {
+        SpringApplication.run(MainApp.class, args);
+    }
+
+    @Override
+    public void run(String... args) {
+        String financeUrl = "https://api.example.com/finance";
+        String kycUrl = "https://api.example.com/kyc";
+
+        FinanceWrapper finance = apiFetchService.fetchFinanceData(financeUrl);
+        KycWrapper kyc = apiFetchService.fetchKycData(kycUrl);
+
+        if (finance != null && finance.entity != null) {
+            System.out.println("Finance Identifiers: " + finance.entity.identifiers);
+            System.out.println("Finance Business Address: " + finance.entity.businessAddress);
         }
 
-        // 2. Assuming we want to process the first KycEntity in the results
-        KycEntity kycEntity = kycResponse.getResults().get(0); // Adjust as needed
-
-        // 3. Map the common identifier (assuming kycid is the common field)
-        String commonIdentifier = financeResponse.getEntity().getIdentifiers().getKycid();
-
-        // 4. Filter KYC segments
-        List<KycSegment> filteredSegments = kycEntity.getKycData().getKycSegments()
-            .stream()
-            .filter(segment -> segment.getId().equals(commonIdentifier))
-            .collect(Collectors.toList());
-
-        // 5. Build the result object
-        return ResultObject.builder()
-            .identifier(financeResponse.getEntity().getIdentifiers())
-            .businessAddress(financeResponse.getEntity().getBusinessAddress())
-            .kycData(KycData.builder()
-                .kycSegments(filteredSegments)
-                .kycSites(kycEntity.getKycData().getKycSites())
-                .riskIndustries(kycEntity.getKycData().getRiskIndustries())
-                .build())
-            .build();
+        if (kyc != null && !kyc.results.isEmpty()) {
+            System.out.println("KYC Identifiers: " + kyc.results.get(0).identifiers);
+            System.out.println("KYC Registration Address: " + kyc.results.get(0).kycData.registrationAddress);
+        }
     }
 }
