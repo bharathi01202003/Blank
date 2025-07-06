@@ -1,36 +1,36 @@
-package com.example.service;
+package org.example.service;
 
-import com.example.model.FinanceWrapper;
-import com.example.model.KycWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.dto.FinanceResponse;
+import org.example.dto.KycResponse;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 @Service
-public class ApiFetchService {
+public class DataService {
 
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
 
-    public ApiFetchService() {
+    public DataService() {
         this.restTemplate = new RestTemplate();
         this.objectMapper = new ObjectMapper();
     }
 
-    public FinanceWrapper fetchFinanceData(String url) {
+    public FinanceResponse fetchFinanceData(String url) {
         try {
             String response = restTemplate.getForObject(url, String.class);
-            return objectMapper.readValue(response, FinanceWrapper.class);
+            return objectMapper.readValue(response, FinanceResponse.class);
         } catch (Exception e) {
             e.printStackTrace();
             return null;
         }
     }
 
-    public KycWrapper fetchKycData(String url) {
+    public KycResponse fetchKycData(String url) {
         try {
             String response = restTemplate.getForObject(url, String.class);
-            return objectMapper.readValue(response, KycWrapper.class);
+            return objectMapper.readValue(response, KycResponse.class);
         } catch (Exception e) {
             e.printStackTrace();
             return null;
@@ -39,42 +39,45 @@ public class ApiFetchService {
 }
 
 
-package com.example;
+package org.example;
 
-import com.example.model.FinanceWrapper;
-import com.example.model.KycWrapper;
-import com.example.service.ApiFetchService;
+import org.example.dto.FinanceResponse;
+import org.example.dto.KycResponse;
+import org.example.service.DataService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @SpringBootApplication
-public class MainApp implements CommandLineRunner {
+public class Main implements CommandLineRunner {
 
     @Autowired
-    private ApiFetchService apiFetchService;
+    private DataService dataService;
 
     public static void main(String[] args) {
-        SpringApplication.run(MainApp.class, args);
+        SpringApplication.run(Main.class, args);
     }
 
     @Override
     public void run(String... args) {
-        String financeUrl = "https://api.example.com/finance";
-        String kycUrl = "https://api.example.com/kyc";
+        String financeUrl = "https://api-int.staging.echonet/ce-third-parties/v2/batch-export?type=FinanceCH";
+        String kycUrl = "https://api-int.staging.echonet/ce-third-parties/v2/entities/kyc?ptyId=69";
 
-        FinanceWrapper finance = apiFetchService.fetchFinanceData(financeUrl);
-        KycWrapper kyc = apiFetchService.fetchKycData(kycUrl);
+        FinanceResponse financeResponse = dataService.fetchFinanceData(financeUrl);
+        KycResponse kycResponse = dataService.fetchKycData(kycUrl);
 
-        if (finance != null && finance.entity != null) {
-            System.out.println("Finance Identifiers: " + finance.entity.identifiers);
-            System.out.println("Finance Business Address: " + finance.entity.businessAddress);
+        if (financeResponse != null) {
+            System.out.println("Finance Data:");
+            System.out.println(financeResponse.getResults());
         }
 
-        if (kyc != null && !kyc.results.isEmpty()) {
-            System.out.println("KYC Identifiers: " + kyc.results.get(0).identifiers);
-            System.out.println("KYC Registration Address: " + kyc.results.get(0).kycData.registrationAddress);
+        if (kycResponse != null) {
+            System.out.println("KYC Data:");
+            System.out.println(kycResponse.getResults());
         }
     }
 }
+
+
+
