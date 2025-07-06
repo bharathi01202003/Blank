@@ -1,83 +1,33 @@
-package org.example.service;
+package org.example.util;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.example.dto.FinanceResponse;
-import org.example.dto.KycResponse;
-import org.springframework.stereotype.Service;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
 
-@Service
-public class DataService {
+import javax.net.ssl.*;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 
-    private final RestTemplate restTemplate;
-    private final ObjectMapper objectMapper;
+public class UnsafeRestTemplate {
 
-    public DataService() {
-        this.restTemplate = new RestTemplate();
-        this.objectMapper = new ObjectMapper();
-    }
+    public static RestTemplate create() throws Exception {
+        // Trust manager that does not validate certificate chains
+        TrustManager[] trustAllCerts = new TrustManager[]{
+            new X509TrustManager() {
+                public void checkClientTrusted(X509Certificate[] certs, String authType) {}
+                public void checkServerTrusted(X509Certificate[] certs, String authType) {}
+                public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+            }
+        };
 
-    public FinanceResponse fetchFinanceData(String url) {
-        try {
-            String response = restTemplate.getForObject(url, String.class);
-            return objectMapper.readValue(response, FinanceResponse.class);
-        } catch (Exception e) {
-            e.printStackTrace();
-            return null;
-        }
-    }
+        // Set up the SSL context to use our trust manager
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(null, trustAllCerts, new SecureRandom());
 
-    public KycResponse fetchKycData(String url) {
-        try {
-            String response = restTemplate.getForObject(url, String.class);
-            return objectMapper.readValue(response, KycResponse.class);
-        } catch (Exception e) {
-            e.printStackTrace();
-            return null;
-        }
+        // Disable hostname verification
+        HttpsURLConnection.setDefaultHostnameVerifier((hostname, session) -> true);
+        HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.getSocketFactory());
+
+        // Return a RestTemplate that uses the custom SSL context
+        return new RestTemplate(new SimpleClientHttpRequestFactory());
     }
 }
-
-
-package org.example;
-
-import org.example.dto.FinanceResponse;
-import org.example.dto.KycResponse;
-import org.example.service.DataService;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.CommandLineRunner;
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-
-@SpringBootApplication
-public class Main implements CommandLineRunner {
-
-    @Autowired
-    private DataService dataService;
-
-    public static void main(String[] args) {
-        SpringApplication.run(Main.class, args);
-    }
-
-    @Override
-    public void run(String... args) {
-        String financeUrl = "https://api-int.staging.echonet/ce-third-parties/v2/batch-export?type=FinanceCH";
-        String kycUrl = "https://api-int.staging.echonet/ce-third-parties/v2/entities/kyc?ptyId=69";
-
-        FinanceResponse financeResponse = dataService.fetchFinanceData(financeUrl);
-        KycResponse kycResponse = dataService.fetchKycData(kycUrl);
-
-        if (financeResponse != null) {
-            System.out.println("Finance Data:");
-            System.out.println(financeResponse.getResults());
-        }
-
-        if (kycResponse != null) {
-            System.out.println("KYC Data:");
-            System.out.println(kycResponse.getResults());
-        }
-    }
-}
-
-
-
