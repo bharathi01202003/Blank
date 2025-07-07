@@ -1,70 +1,116 @@
-package org.example.config;
+package org.example.service;
 
-import jakarta.annotation.PostConstruct;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.config.ApiConfig;
+import org.example.model.*;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.*;
+import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
-import javax.net.ssl.*;
-import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
-import java.util.Collections;
+import java.io.File;
+import java.util.*;
+import java.util.stream.Collectors;
 
-@Configuration
-public class ApiConfig {
+@Service
+public class KycMergeService {
 
-    @Value("${api.token}")
-    private String authToken;
+    @Autowired
+    private RestTemplate restTemplate;
 
-    @Value("${api.finance.url}")
-    private String financeApiUrl;
+    @Autowired
+    private ApiConfig apiConfig;
 
-    @Value("${api.kyc.url}")
-    private String kycApiUrl;
-
-    public String getAuthToken() {
-        return authToken;
-    }
-
-    public String getFinanceApiUrl() {
-        return financeApiUrl;
-    }
-
-    public String getKycApiUrl() {
-        return kycApiUrl;
-    }
-
-    @Bean
-    public RestTemplate restTemplate() {
-        disableSslValidation();
-        RestTemplate restTemplate = new RestTemplate();
-        restTemplate.setInterceptors(Collections.singletonList((request, body, execution) -> {
-            request.getHeaders().add("Authorization", "Bearer " + authToken);
-            return execution.execute(request, body);
-        }));
-        return restTemplate;
-    }
-
-    @PostConstruct
-    public void disableSslValidation() {
+    public List<MergedEntity> fetchAndMergeData() {
         try {
-            TrustManager[] trustAllCerts = new TrustManager[]{
-                new X509TrustManager() {
-                    public void checkClientTrusted(X509Certificate[] certs, String authType) {}
-                    public void checkServerTrusted(X509Certificate[] certs, String authType) {}
-                    public X509Certificate[] getAcceptedIssuers() {
-                        return new X509Certificate[0];
-                    }
-                }
-            };
+            // 1. Fetch Finance Data
+            File1Root financeData = fetchFromApi(apiConfig.getFinanceApiUrl(), File1Root.class);
+            if (financeData == null || financeData.getResults() == null) return Collections.emptyList();
 
-            SSLContext sc = SSLContext.getInstance("TLS");
-            sc.init(null, trustAllCerts, new SecureRandom());
-            HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
-            HttpsURLConnection.setDefaultHostnameVerifier((hostname, session) -> true);
+            List<MergedEntity> mergedList = new ArrayList<>();
+
+            for (File1Result finance : financeData.getResults()) {
+                if (!isValidFinanceRecord(finance)) continue;
+
+                String ptyId = finance.getEntity().getIdentifiers().get(0).getPtyId();
+                String kycUrl = apiConfig.getKycApiUrl() + "?ptyId=" + ptyId;
+                File2Root kycData = fetchFromApi(kycUrl, File2Root.class);
+
+                if (kycData == null || kycData.getResults() == null) continue;
+
+                Optional<File2Result> matchingKyc = kycData.getResults().stream()
+                    .filter(this::isValidKycRecord)
+                    .filter(k -> k.getIdentifiers().get(0).getPtyId().equals(ptyId))
+                    .findFirst();
+
+                matchingKyc.ifPresent(kyc -> mergedList.add(createMergedEntity(finance, kyc)));
+            }
+
+            new ObjectMapper().writerWithDefaultPrettyPrinter().writeValue(new File(apiConfig.getOutputFilePath()), mergedList);
+
+            return mergedList;
+
         } catch (Exception e) {
-            System.err.println("Could not disable SSL: " + e.getMessage());
+            System.err.println("Failed to merge data: " + e.getMessage());
+            return Collections.emptyList();
         }
+    }
+
+    private <T> T fetchFromApi(String url, Class<T> responseType) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", "Bearer " + apiConfig.getAuthToken());
+        HttpEntity<String> entity = new HttpEntity<>(headers);
+
+        ResponseEntity<T> response = restTemplate.exchange(url, HttpMethod.GET, entity, responseType);
+
+        if (!response.getStatusCode().is2xxSuccessful()) {
+            throw new RuntimeException("API request failed: " + response.getStatusCode());
+        }
+        return response.getBody();
+    }
+
+    private boolean isValidFinanceRecord(File1Result finance) {
+        return finance != null && finance.getEntity() != null && finance.getEntity().getIdentifiers() != null;
+    }
+
+    private boolean isValidKycRecord(File2Result kyc) {
+        return kyc != null && kyc.getIdentifiers() != null && !kyc.getIdentifiers().isEmpty();
+    }
+
+    private MergedEntity createMergedEntity(File1Result finance, File2Result kyc) {
+        MergedEntity merged = new MergedEntity();
+        merged.setIdentifiers(finance.getEntity().getIdentifiers());
+        merged.setBusinessAddress(finance.getEntity().getBusinessAddress());
+        if (kyc.getKycData() != null) {
+            merged.setKycSites(kyc.getKycData().getKycSites());
+            merged.setKycSegment(kyc.getKycData().getKycSegment());
+            merged.setRiskIndustry(kyc.getKycData().getRiskIndustry());
+        }
+        return merged;
+    }
+} 
+
+
+
+
+package org.example.controller;
+
+import org.example.model.MergedEntity;
+import org.example.service.KycMergeService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api")
+public class KycController {
+
+    @Autowired
+    private KycMergeService mergeService;
+
+    @GetMapping("/merge")
+    public List<MergedEntity> getMergedResults() {
+        return mergeService.fetchAndMergeData();
     }
 }
