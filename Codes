@@ -1,13 +1,70 @@
-I hope you are doing well.
+package org.example.config;
 
-I would like to take a moment to clarify a few points regarding my current assignment and the full-time conversion process.
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.client.RestTemplate;
 
-My tasks have been primarily handled under the supervision of Mr. Siva, with whom I maintain regular communication and ensure timely completion of all assigned responsibilities. However, I came to understand that his feedback may not have been taken into account during the full-time conversion evaluation. As he directly oversees my work, I believe his input would offer a more accurate reflection of my performance.
+import javax.net.ssl.*;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
+import java.util.Collections;
 
-In terms of task allocation, I was initially informed that I would be working on activities related to APIs. However, upon further discussion with the team, I was informed that APIs are currently not being actively used. When I inquired about ongoing assignments, I was told that there is no active work at the moment and was advised to learn API-related concepts through online resources such as YouTube. I was also informed that tasks related to writing test cases may be assigned after a week.
+@Configuration
+public class ApiConfig {
 
-I am sharing this for your awareness and transparency regarding the nature of my current involvement.
+    @Value("${api.token}")
+    private String authToken;
 
-Thank you for your time and understanding
+    @Value("${api.finance.url}")
+    private String financeApiUrl;
 
-warm regards, 
+    @Value("${api.kyc.url}")
+    private String kycApiUrl;
+
+    public String getAuthToken() {
+        return authToken;
+    }
+
+    public String getFinanceApiUrl() {
+        return financeApiUrl;
+    }
+
+    public String getKycApiUrl() {
+        return kycApiUrl;
+    }
+
+    @Bean
+    public RestTemplate restTemplate() {
+        disableSslValidation();
+        RestTemplate restTemplate = new RestTemplate();
+        restTemplate.setInterceptors(Collections.singletonList((request, body, execution) -> {
+            request.getHeaders().add("Authorization", "Bearer " + authToken);
+            return execution.execute(request, body);
+        }));
+        return restTemplate;
+    }
+
+    @PostConstruct
+    public void disableSslValidation() {
+        try {
+            TrustManager[] trustAllCerts = new TrustManager[]{
+                new X509TrustManager() {
+                    public void checkClientTrusted(X509Certificate[] certs, String authType) {}
+                    public void checkServerTrusted(X509Certificate[] certs, String authType) {}
+                    public X509Certificate[] getAcceptedIssuers() {
+                        return new X509Certificate[0];
+                    }
+                }
+            };
+
+            SSLContext sc = SSLContext.getInstance("TLS");
+            sc.init(null, trustAllCerts, new SecureRandom());
+            HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+            HttpsURLConnection.setDefaultHostnameVerifier((hostname, session) -> true);
+        } catch (Exception e) {
+            System.err.println("Could not disable SSL: " + e.getMessage());
+        }
+    }
+}
