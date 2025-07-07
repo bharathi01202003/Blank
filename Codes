@@ -23,58 +23,59 @@ public class DataService {
 
     public List<MergedEntity> fetchAndMergeData() {
         try {
-            FinanceResponse financeResponse = fetch(financeUrl, FinanceResponse.class);
-            KycResponse kycResponse = fetch(kycUrl, KycResponse.class);
+            File1Root financeData = fetch(financeUrl, File1Root.class);
+            File2Root kycData = fetch(kycUrl, File2Root.class);
 
-            return mergeData(financeResponse, kycResponse);
+            return mergeData(financeData, kycData);
         } catch (Exception e) {
-            System.err.println("Failed to fetch or merge: " + e.getMessage());
+            System.err.println("Failed to merge data: " + e.getMessage());
             return Collections.emptyList();
         }
     }
 
     private <T> T fetch(String url, Class<T> clazz) {
         return webClient.get()
-            .uri(url)
-            .retrieve()
-            .onStatus(status -> status.isError(), response -> {
-                System.err.println("❌ API error: " + response.statusCode());
-                return Mono.error(new RuntimeException("API call failed with status: " + response.statusCode()));
-            })
-            .bodyToMono(clazz)
-            .block();
+                .uri(url)
+                .retrieve()
+                .onStatus(status -> status.isError(), response -> {
+                    System.err.println("API Error: " + response.statusCode());
+                    return Mono.error(new RuntimeException("API call failed with status: " + response.statusCode()));
+                })
+                .bodyToMono(clazz)
+                .block();
     }
 
-    private List<MergedEntity> mergeData(FinanceResponse finance, KycResponse kyc) {
-        if (finance == null || kyc == null) return Collections.emptyList();
+    private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
+        if (financeData == null || kycData == null) return Collections.emptyList();
 
         List<MergedEntity> merged = new ArrayList<>();
 
-        for (FinanceResults financeResult : finance.getResults()) {
+        for (File1Result financeResult : financeData.getResults()) {
             if (financeResult.getEntity() == null || financeResult.getEntity().getIdentifiers() == null) continue;
 
-            Identifier financeId = financeResult.getEntity().getIdentifiers(); // SINGLE IDENTIFIER
+            Identifiers financeId = financeResult.getEntity().getIdentifiers();
 
-            Optional<ResultObject> match = kyc.getResults().stream()
-                .filter(kycResult -> kycResult.getIdentifiers() != null && !kycResult.getIdentifiers().isEmpty())
-                .filter(kycResult -> financeId.getPtyId().equals(kycResult.getIdentifiers().get(0).getPtyId()))
+            Optional<File2Result> match = kycData.getResults().stream()
+                .filter(kyc -> kyc.getIdentifiers() != null && !kyc.getIdentifiers().isEmpty())
+                .filter(kyc -> financeId.getPtyId().equals(kyc.getIdentifiers().get(0).getPtyId()))
                 .findFirst();
 
-            match.ifPresent(kycResult -> {
-                MergedEntity me = new MergedEntity();
-                me.setIdentifiers(Collections.singletonList(financeId));
-                me.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
+            match.ifPresent(kyc -> {
+                MergedEntity mergedEntity = new MergedEntity();
+                mergedEntity.setIdentifiers(Collections.singletonList(financeId));
+                mergedEntity.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
 
-                if (kycResult.getKycData() != null) {
-                    me.setKycSites(kycResult.getKycData().getKycSites());
-                    me.setKycSegment(kycResult.getKycData().getKycSegment());
-                    me.setRiskIndustry(kycResult.getKycData().getRiskIndustry());
+                KycData kycDataObj = kyc.getKycData();
+                if (kycDataObj != null) {
+                    mergedEntity.setKycSites(kycDataObj.getKycSites());
+                    mergedEntity.setKycSegment(kycDataObj.getKycSegment());
+                    mergedEntity.setRiskIndustry(kycDataObj.getRiskIndustry());
                 }
 
-                merged.add(me);
+                merged.add(mergedEntity);
             });
         }
 
         return merged;
     }
-}
+} 
