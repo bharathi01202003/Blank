@@ -1,88 +1,80 @@
 package org.example.service;
 
-import org.example.config.ApiConfig;
-import org.example.model.*;
+import org.example.dto.*;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.*;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
 
 import java.util.*;
-import java.util.stream.Collectors;
 
 @Service
-public class KycMergeService {
+public class DataService {
 
     @Autowired
-    private RestTemplate restTemplate;
+    private WebClient webClient;
 
-    @Autowired
-    private ApiConfig apiConfig;
+    @Value("${api.finance.url}")
+    private String financeUrl;
+
+    @Value("${api.kyc.url}")
+    private String kycUrl;
 
     public List<MergedEntity> fetchAndMergeData() {
         try {
-            File1Root financeData = fetchFromApi(apiConfig.getFinanceApiUrl(), File1Root.class);
-            if (financeData == null || financeData.getResults() == null) return Collections.emptyList();
+            FinanceResponse financeResponse = fetch(financeUrl, FinanceResponse.class);
+            KycResponse kycResponse = fetch(kycUrl, KycResponse.class);
 
-            List<MergedEntity> mergedList = new ArrayList<>();
-
-            for (File1Result finance : financeData.getResults()) {
-                if (!isValidFinanceRecord(finance)) continue;
-
-                String ptyId = finance.getEntity().getIdentifiers().getPtyId();
-                String kycUrl = apiConfig.getKycApiUrl() + "?ptyId=" + ptyId;
-                System.out.println("DEBUG: Fetching KYC from URL: " + kycUrl);
-
-                File2Root kycData = fetchFromApi(kycUrl, File2Root.class);
-
-                if (kycData == null || kycData.getResults() == null) continue;
-
-                Optional<File2Result> matchingKyc = kycData.getResults().stream()
-                    .filter(this::isValidKycRecord)
-                    .filter(k -> k.getIdentifiers().get(0).getPtyId().equals(ptyId))
-                    .findFirst();
-
-                matchingKyc.ifPresent(kyc -> mergedList.add(createMergedEntity(finance, kyc)));
-            }
-
-            return mergedList;
-
+            return mergeData(financeResponse, kycResponse);
         } catch (Exception e) {
-            System.err.println("Failed to merge data: " + e.getMessage());
+            System.err.println("Failed to fetch or merge: " + e.getMessage());
             return Collections.emptyList();
         }
     }
 
-    private <T> T fetchFromApi(String url, Class<T> responseType) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Authorization", "Bearer " + apiConfig.getAuthToken());
-        HttpEntity<String> entity = new HttpEntity<>(headers);
+    private <T> T fetch(String url, Class<T> clazz) {
+        return webClient.get()
+            .uri(url)
+            .retrieve()
+            .onStatus(status -> status.isError(), response -> {
+                System.err.println("❌ API error: " + response.statusCode());
+                return Mono.error(new RuntimeException("API call failed with status: " + response.statusCode()));
+            })
+            .bodyToMono(clazz)
+            .block();
+    }
 
-        ResponseEntity<T> response = restTemplate.exchange(url, HttpMethod.GET, entity, responseType);
+    private List<MergedEntity> mergeData(FinanceResponse finance, KycResponse kyc) {
+        if (finance == null || kyc == null) return Collections.emptyList();
 
-        if (!response.getStatusCode().is2xxSuccessful()) {
-            throw new RuntimeException("API request failed: " + response.getStatusCode());
+        List<MergedEntity> merged = new ArrayList<>();
+
+        for (FinanceResults financeResult : finance.getResults()) {
+            if (financeResult.getEntity() == null || financeResult.getEntity().getIdentifiers() == null) continue;
+
+            Identifier financeId = financeResult.getEntity().getIdentifiers(); // SINGLE IDENTIFIER
+
+            Optional<ResultObject> match = kyc.getResults().stream()
+                .filter(kycResult -> kycResult.getIdentifiers() != null && !kycResult.getIdentifiers().isEmpty())
+                .filter(kycResult -> financeId.getPtyId().equals(kycResult.getIdentifiers().get(0).getPtyId()))
+                .findFirst();
+
+            match.ifPresent(kycResult -> {
+                MergedEntity me = new MergedEntity();
+                me.setIdentifiers(Collections.singletonList(financeId));
+                me.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
+
+                if (kycResult.getKycData() != null) {
+                    me.setKycSites(kycResult.getKycData().getKycSites());
+                    me.setKycSegment(kycResult.getKycData().getKycSegment());
+                    me.setRiskIndustry(kycResult.getKycData().getRiskIndustry());
+                }
+
+                merged.add(me);
+            });
         }
-        return response.getBody();
-    }
 
-    private boolean isValidFinanceRecord(File1Result finance) {
-        return finance != null && finance.getEntity() != null && finance.getEntity().getIdentifiers() != null;
-    }
-
-    private boolean isValidKycRecord(File2Result kyc) {
-        return kyc != null && kyc.getIdentifiers() != null && !kyc.getIdentifiers().isEmpty();
-    }
-
-    private MergedEntity createMergedEntity(File1Result finance, File2Result kyc) {
-        MergedEntity merged = new MergedEntity();
-        merged.setIdentifiers(Collections.singletonList(finance.getEntity().getIdentifiers()));
-        merged.setBusinessAddress(finance.getEntity().getBusinessAddress());
-        if (kyc.getKycData() != null) {
-            merged.setKycSites(kyc.getKycData().getKycSites());
-            merged.setKycSegment(kyc.getKycData().getKycSegment());
-            merged.setRiskIndustry(kyc.getKycData().getRiskIndustry());
-        }
         return merged;
     }
 }
