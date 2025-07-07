@@ -1,38 +1,13 @@
-package org.example.util;
+I hope you are doing well.
 
-import org.springframework.http.client.ClientHttpRequestInterceptor;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
-import org.springframework.web.client.RestTemplate;
+I would like to take a moment to clarify a few points regarding my current assignment and the full-time conversion process.
 
-import javax.net.ssl.*;
-import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
-import java.util.Collections;
+My tasks have been primarily handled under the supervision of Mr. Siva, with whom I maintain regular communication and ensure timely completion of all assigned responsibilities. However, I came to understand that his feedback may not have been taken into account during the full-time conversion evaluation. As he directly oversees my work, I believe his input would offer a more accurate reflection of my performance.
 
-public class UnsafeRestTemplate {
+In terms of task allocation, I was initially informed that I would be working on activities related to APIs. However, upon further discussion with the team, I was informed that APIs are currently not being actively used. When I inquired about ongoing assignments, I was told that there is no active work at the moment and was advised to learn API-related concepts through online resources such as YouTube. I was also informed that tasks related to writing test cases may be assigned after a week.
 
-    public static RestTemplate create(String accessToken) throws Exception {
-        TrustManager[] trustAllCerts = new TrustManager[]{
-            new X509TrustManager() {
-                public void checkClientTrusted(X509Certificate[] certs, String authType) {}
-                public void checkServerTrusted(X509Certificate[] certs, String authType) {}
-                public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-            }
-        };
+I am sharing this for your awareness and transparency regarding the nature of my current involvement.
 
-        SSLContext sslContext = SSLContext.getInstance("TLS");
-        sslContext.init(null, trustAllCerts, new SecureRandom());
-        HttpsURLConnection.setDefaultHostnameVerifier((hostname, session) -> true);
-        HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.getSocketFactory());
+Thank you for your time and understanding
 
-        RestTemplate restTemplate = new RestTemplate(new SimpleClientHttpRequestFactory());
-
-        // Add Bearer token interceptor
-        restTemplate.setInterceptors(Collections.singletonList((request, body, execution) -> {
-            request.getHeaders().add("Authorization", "Bearer " + accessToken);
-            return execution.execute(request, body);
-        }));
-
-        return restTemplate;
-    }
-}
+warm regards, 
