@@ -21,7 +21,6 @@ public class KycMergeService {
 
     public List<MergedEntity> fetchAndMergeData() {
         try {
-            // 1. Fetch Finance Data
             File1Root financeData = fetchFromApi(apiConfig.getFinanceApiUrl(), File1Root.class);
             if (financeData == null || financeData.getResults() == null) return Collections.emptyList();
 
@@ -30,8 +29,10 @@ public class KycMergeService {
             for (File1Result finance : financeData.getResults()) {
                 if (!isValidFinanceRecord(finance)) continue;
 
-                String ptyId = finance.getEntity().getIdentifiers().get(0).getPtyId();
+                String ptyId = finance.getEntity().getIdentifiers().getPtyId();
                 String kycUrl = apiConfig.getKycApiUrl() + "?ptyId=" + ptyId;
+                System.out.println("DEBUG: Fetching KYC from URL: " + kycUrl);
+
                 File2Root kycData = fetchFromApi(kycUrl, File2Root.class);
 
                 if (kycData == null || kycData.getResults() == null) continue;
@@ -75,7 +76,7 @@ public class KycMergeService {
 
     private MergedEntity createMergedEntity(File1Result finance, File2Result kyc) {
         MergedEntity merged = new MergedEntity();
-        merged.setIdentifiers(finance.getEntity().getIdentifiers());
+        merged.setIdentifiers(Collections.singletonList(finance.getEntity().getIdentifiers()));
         merged.setBusinessAddress(finance.getEntity().getBusinessAddress());
         if (kyc.getKycData() != null) {
             merged.setKycSites(kyc.getKycData().getKycSites());
