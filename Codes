@@ -1,11 +1,44 @@
-String rawHost = "api-uat.staging.echonet";
-String rawUrl = "https://172.26.1.45/oauth2/v1/token?grant_type=client_credentials";
+package org.example.service;
 
-Map<String, Object> response = webClient.post()
-        .uri(rawUrl)
-        .header("Accept", "*/*;version=gamma")
-        .header("Authorization", "Basic " + basicToken)
-        .header("Host", rawHost)  // <-- spoof the real host
-        .retrieve()
-        .bodyToMono(new ParameterizedTypeReference<>() {})
-        .block();
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClient;
+
+import java.util.Map;
+
+@Service
+public class AuthService {
+
+    private final WebClient webClient;
+
+    // Inject values from application.properties
+    @Value("${auth.basic.token}")
+    private String basicToken;
+
+    // Hardcoded IP for echonet, as DNS isn't resolving
+    private final String apiHost = "api-uat.staging.echonet";
+    private final String tokenUrl = "https://172.26.1.45/oauth2/v1/token?grant_type=client_credentials";
+
+    public AuthService(WebClient.Builder builder) {
+        this.webClient = builder.build();
+    }
+
+    public String fetchToken() {
+        try {
+            Map<String, Object> response = webClient.post()
+                    .uri(tokenUrl)                                // Call IP instead of hostname
+                    .header("Host", apiHost)                      // Spoof the Host header
+                    .header("Accept", "*/*;version=gamma")
+                    .header("Authorization", "Basic " + basicToken)
+                    .retrieve()
+                    .bodyToMono(new ParameterizedTypeReference<>() {})
+                    .block();
+
+            return response != null ? (String) response.get("access_token") : null;
+        } catch (Exception e) {
+            System.err.println("❌ Auth token fetch failed: " + e.getMessage());
+            return null;
+        }
+    }
+}
