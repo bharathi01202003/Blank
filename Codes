@@ -11,6 +11,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -68,6 +69,10 @@ public class DataService {
                 logger.info("Response from {}: {}", url, result);
 
                 return result; // Return the result if successful
+            } catch (WebClientResponseException e) {
+                logger.error("Error response from API: {} - Status code: {} - Body: {}", 
+                             url, e.getStatusCode(), e.getResponseBodyAsString());
+                break; // Exit the loop on error response
             } catch (Exception e) {
                 attempts++;
                 logger.warn("Attempt {} failed for URL {}: {}", attempts, url, e.getMessage());
