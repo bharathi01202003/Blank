@@ -1,39 +1,35 @@
 @Service
-public class AuthService {
+public class DataService {
 
     private final WebClient webClient;
+    private final AuthService authService;
 
-    @Value("${auth.url}")
-    private String authUrl;
+    @Value("${api.finance.url}")
+    private String financeUrl;
 
-    @Value("${auth.client-id}")
-    private String clientId;
+    @Value("${api.kyc.url}")
+    private String kycUrl;
 
-    @Value("${auth.client-secret}")
-    private String clientSecret;
-
-    public AuthService(WebClient.Builder builder) {
-        this.webClient = builder.build();
+    public DataService(WebClient.Builder webClientBuilder, AuthService authService) {
+        this.webClient = webClientBuilder.build();
+        this.authService = authService;
     }
 
-    public String fetchAuthToken() {
+    private <T> T fetch(String url, Class<T> clazz) {
+        String token = authService.fetchAuthToken(); // 🔑 get fresh token here
+
         try {
-            Map<String, String> request = Map.of(
-                "clientId", clientId,
-                "clientSecret", clientSecret
-            );
-
-            Map<String, String> response = webClient.post()
-                .uri(authUrl)
-                .header("Content-Type", "application/json")
-                .bodyValue(request)
+            return webClient.get()
+                .uri(url)
+                .header("Accept", "application/json;version=gamma")
+                .header("Authorization", "Bearer " + token)
                 .retrieve()
-                .bodyToMono(new ParameterizedTypeReference<Map<String, String>>() {})
+                .bodyToMono(clazz)
                 .block();
-
-            return response.get("accessToken");
         } catch (Exception e) {
-            throw new RuntimeException("Failed to fetch auth token", e);
+            throw new RuntimeException("Failed to fetch data from: " + url, e);
         }
     }
+
+    // mergeData and fetchMergedData stay same...
 }
