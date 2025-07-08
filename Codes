@@ -1,33 +1,35 @@
-package org.example.service;
+package org.example;
 
-import org.springframework.core.ParameterizedTypeReference;
-import org.springframework.stereotype.Service;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.reactive.function.client.WebClient;
 
-import java.util.Map;
-
-@Service
-public class AuthService {
-
-    private final WebClient webClient;
-
-    // Hardcoded (working) token URL and Basic Auth token
-    private final String tokenUrl = "https://api-uat.staging.echonet/oauth2/v1/token?grant_type=client_credentials";
-    private final String basicToken = "cnRmVEdoTHB1UUVZNVRBWVW2d9FoVz1SMINVNFYyU3c6UDV0YXp6MUhCeGTVUZITg==";
-
-    public AuthService(WebClient.Builder builder) {
-        this.webClient = builder.build();
+@SpringBootApplication
+public class Main {
+    public static void main(String[] args) {
+        SpringApplication.run(Main.class, args);
     }
 
-    public String fetchAuthToken() {
-        Map<String, String> response = webClient.post()
-                .uri(tokenUrl)
-                .header("Accept", "*/*;version=gamma")
-                .header("Authorization", "Basic " + basicToken)
-                .retrieve()
-                .bodyToMono(new ParameterizedTypeReference<Map<String, String>>() {})
-                .block();
+    @Bean
+    public WebClient.Builder webClientBuilder() {
+        return WebClient.builder();
+    }
 
-        return response != null ? response.get("access_token") : null;
+    @RestController
+    public static class DummyController {
+
+        private final WebClient webClient;
+
+        public DummyController(WebClient.Builder builder) {
+            this.webClient = builder.build();
+        }
+
+        @GetMapping("/get-token")
+        public String getToken() {
+            return "Dummy Token: dummy-token-1234";
+        }
     }
 }
