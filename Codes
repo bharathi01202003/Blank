@@ -26,66 +26,114 @@ public class DataService {
     private static final Logger logger = LoggerFactory.getLogger(DataService.class);
     private static final int MAX_RETRIES = 3;
 
+    @Value("${api.auth.url}")
+    private String authUrl;
+
     @Value("${api.finance.url}")
     private String financeUrl;
 
     @Value("${api.kyc.url}")
     private String kycUrl;
 
+    private String accessToken;
+
     @Autowired
     public DataService(WebClient.Builder webClientBuilder) {
         this.webClient = webClientBuilder.build();
     }
 
-    public List<MergedEntity> fetchMergedData() {
+    // Method to authenticate and obtain the access token
+    public void authenticate() {
+        String requestBody = String.format("{\"client_id\":\"%s\", \"client_secret\":\"%s\", \"grant_type\":\"client_credentials\"}",
+                System.getProperty("api.client.id"), System.getProperty("api.client.secret"));
+
         try {
-            // Check DNS resolution
-            InetAddress address = InetAddress.getByName("api-int.staging.echonet");
-            logger.info("Resolved hostname: {}", address.getHostAddress());
-        } catch (IOException e) {
-            logger.error("Hostname could not be resolved: api-int.staging.echonet", e);
+            TokenResponse tokenResponse = webClient.post()
+                    .uri(authUrl)
+                    .header("Content-Type", "application/json")
+                    .bodyValue(requestBody)
+                    .retrieve()
+                    .bodyToMono(TokenResponse.class)
+                    .block();
+
+            if (tokenResponse != null) {
+                accessToken = tokenResponse.getAccessToken();
+                logger.info("Successfully obtained access token.");
+            } else {
+                logger.error("Failed to obtain access token.");
+            }
+        } catch (Exception e) {
+            logger.error("Error during authentication: {}", e.getMessage());
+        }
+    }
+
+    public List<MergedEntity> fetchMergedData() {
+        // Check DNS resolution
+        if (!checkDnsResolution("api-int.staging.echonet")) {
             return Collections.emptyList(); // Exit if DNS resolution fails
         }
 
+        // Authenticate to get the access token
+        authenticate();
+
+        // Fetch data from APIs
         File1Root financeData = fetch(financeUrl, File1Root.class);
         File2Root kycData = fetch(kycUrl, File2Root.class);
 
+        // Merge the fetched data
         return mergeData(financeData, kycData);
+    }
+
+    private boolean checkDnsResolution(String hostname) {
+        try {
+            InetAddress address = InetAddress.getByName(hostname);
+            logger.info("Resolved hostname: {}", address.getHostAddress());
+            return true;
+        } catch (IOException e) {
+            logger.error("Hostname could not be resolved: {}", hostname, e);
+            return false;
+        }
     }
 
     private <T> T fetch(String url, Class<T> clazz) {
         int attempts = 0;
-        boolean success = false;
         T result = null;
 
-        while (attempts < MAX_RETRIES && !success) {
+        while (attempts < MAX_RETRIES) {
             try {
                 result = webClient.get()
                         .uri(url)
                         .header("Accept", "*/*;version=gamma") // Add the Accept header
-                        .header("Authorization", "Bearer " + System.getProperty("api.token")) // Use the token from properties
+                        .header("Authorization", "Bearer " + accessToken) // Use the token from authentication
                         .retrieve()
                         .bodyToMono(clazz)
                         .block();
-                success = true; // Set to true if the call is successful
+                logger.info("Successfully fetched data from {}", url);
+                return result; // Return the result if successful
             } catch (Exception e) {
                 attempts++;
-                logger.warn("Attempt {} failed: {}", attempts, e.getMessage());
+                logger.warn("Attempt {} failed for URL {}: {}", attempts, url, e.getMessage());
                 if (attempts >= MAX_RETRIES) {
-                    logger.error("Max retries reached. Giving up on API call.");
+                    logger.error("Max retries reached for URL {}. Giving up on API call.", url);
                 }
             }
         }
-        return result;
+        return result; // Return null if all attempts fail
     }
 
     private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
-        if (financeData == null || kycData == null) return Collections.emptyList();
+        if (financeData == null || kycData == null) {
+            logger.warn("One or both data sources are null. Returning empty list.");
+            return Collections.emptyList();
+        }
 
         List<MergedEntity> merged = new ArrayList<>();
 
         for (File1Result financeResult : financeData.getResults()) {
-            if (financeResult.getEntity() == null || financeResult.getEntity().getIdentifiers() == null) continue;
+            if (financeResult.getEntity() == null || financeResult.getEntity().getIdentifiers() == null) {
+                logger.warn("Skipping finance result with null entity or identifiers.");
+                continue;
+            }
 
             Identifiers financeId = financeResult.getEntity().getIdentifiers();
             Optional<File2Result> match = kycData.getResults().stream()
@@ -109,6 +157,20 @@ public class DataService {
             });
         }
 
+        logger.info("Merged {} entities from finance and KYC data.", merged.size());
         return merged;
+    }
+
+    // Inner class to map the token response
+    public static class TokenResponse {
+        private String access_token;
+
+        public String getAccessToken() {
+            return access_token;
+        }
+
+        public void setAccessToken(String access_token) {
+            this.access_token = access_token;
+        }
     }
 }
