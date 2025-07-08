@@ -1,47 +1,116 @@
-package org.example.config;
+package org.example.service;
 
-import jakarta.annotation.PostConstruct;
+import org.example.model.File1Root;
+import org.example.model.File2Root;
+import org.example.model.MergedEntity;
+import org.example.model.File1Result;
+import org.example.model.File2Result;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.http.HttpHeaders;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 import org.springframework.web.reactive.function.client.WebClient;
-import reactor.netty.http.client.HttpClient;
-import reactor.netty.tcp.SslProvider;
-import reactor.netty.transport.ProxyProvider;
-import reactor.netty.transport.logging.AdvancedByteBufFormat;
+import reactor.core.publisher.Mono;
 
-import javax.net.ssl.*;
-import java.security.cert.X509Certificate;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
 
-@Configuration
-public class AppConfig {
+@Service
+public class DataService {
 
-    @Value("${api.token}")
-    private String authToken;
+    private final RestTemplate restTemplate;
+    private static final Logger logger = LoggerFactory.getLogger(DataService.class);
+    private static final int MAX_RETRIES = 3;
 
-    @Bean
-    public WebClient webClient() {
-        // Create insecure TrustManager
-        TrustManager[] trustAllCerts = new TrustManager[]{
-            new X509TrustManager() {
-                public void checkClientTrusted(X509Certificate[] certs, String authType) {}
-                public void checkServerTrusted(X509Certificate[] certs, String authType) {}
-                public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+    @Autowired
+    private WebClient webClient;
+
+    @Value("${api.finance.url}")
+    private String financeUrl;
+
+    @Value("${api.kyc.url}")
+    private String kycUrl;
+
+    @Autowired
+    public DataService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
+    }
+
+    public List<MergedEntity> fetchMergedData() {
+        try {
+            // Check DNS resolution
+            InetAddress address = InetAddress.getByName("api-int.staging");
+            logger.info("Resolved hostname: {}", address.getHostAddress());
+        } catch (IOException e) {
+            logger.error("Hostname could not be resolved: api-int.staging", e);
+            return Collections.emptyList(); // Exit if DNS resolution fails
+        }
+
+        File1Root financeData = fetch(financeUrl, File1Root.class);
+        File2Root kycData = fetch(kycUrl, File2Root.class);
+
+        return mergeData(financeData, kycData);
+    }
+
+    private <T> T fetch(String url, Class<T> clazz) {
+        int attempts = 0;
+        boolean success = false;
+        T result = null;
+
+        while (attempts < MAX_RETRIES && !success) {
+            try {
+                result = webClient.get()
+                        .uri(url)
+                        .retrieve()
+                        .bodyToMono(clazz)
+                        .block();
+                success = true; // Set to true if the call is successful
+            } catch (Exception e) {
+                attempts++;
+                logger.warn("Attempt {} failed: {}", attempts, e.getMessage());
+                if (attempts >= MAX_RETRIES) {
+                    logger.error("Max retries reached. Giving up on API call.");
+                }
             }
-        };
+        }
+        return result;
+    }
 
-        SslContextBuilder sslContextBuilder = SslContextBuilder.forClient()
-            .trustManager(InsecureTrustManagerFactory.INSTANCE);
+    private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
+        if (financeData == null || kycData == null) return Collections.emptyList();
 
-        HttpClient httpClient = HttpClient.create()
-            .secure(t -> t.sslContext(sslContextBuilder))
-            .wiretap(true);
+        List<MergedEntity> merged = new ArrayList<>();
 
-        return WebClient.builder()
-            .clientConnector(new ReactorClientHttpConnector(httpClient))
-            .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + authToken)
-            .defaultHeader(HttpHeaders.ACCEPT, "application/json")
-            .build();
+        for (File1Result financeResult : financeData.getResults()) {
+            if (financeResult.getEntity() == null || financeResult.getEntity().getIdentifiers() == null) continue;
+
+            Identifiers financeId = financeResult.getEntity().getIdentifiers();
+            Optional<File2Result> match = kycData.getResults().stream()
+                    .filter(kyc -> kyc.getIdentifiers() != null && !kyc.getIdentifiers().isEmpty() &&
+                            financeId.getPtyId().equals(kyc.getIdentifiers().get(0).getPtyId()))
+                    .findFirst();
+
+            match.ifPresent(kyc -> {
+                MergedEntity mergedEntity = new MergedEntity();
+                mergedEntity.setIdentifiers(Collections.singletonList(financeId));
+                mergedEntity.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
+
+                KycData kycDataObj = kyc.getKycData();
+                if (kycDataObj != null) {
+                    mergedEntity.setKycSites(kycDataObj.getKycSites());
+                    mergedEntity.setKycSegment(kycDataObj.getKycSegment());
+                    mergedEntity.setRiskIndustry(kycDataObj.getRiskIndustry());
+                }
+
+                merged.add(mergedEntity);
+            });
+        }
+
+        return merged;
     }
 }
