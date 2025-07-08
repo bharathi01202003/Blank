@@ -23,7 +23,6 @@ public class DataService {
 
     private final WebClient webClient;
     private static final Logger logger = LoggerFactory.getLogger(DataService.class);
-    private static final int MAX_RETRIES = 3;
 
     @Value("${api.finance.url}")
     private String financeUrl;
@@ -51,37 +50,26 @@ public class DataService {
     }
 
     private <T> T fetch(String url, Class<T> clazz) {
-        int attempts = 0;
-        T result = null;
+        try {
+            logger.info("Fetching data from URL: {}", url);
+            T result = webClient.get()
+                    .uri(url)
+                    .header("Accept", "*/*;version=gamma")
+                    .header("Authorization", "Bearer " + System.getProperty("api.token"))
+                    .retrieve()
+                    .bodyToMono(clazz)
+                    .block();
 
-        while (attempts < MAX_RETRIES) {
-            try {
-                logger.info("Fetching data from URL: {}", url);
-                result = webClient.get()
-                        .uri(url)
-                        .header("Accept", "*/*;version=gamma")
-                        .header("Authorization", "Bearer " + System.getProperty("api.token"))
-                        .retrieve()
-                        .bodyToMono(clazz)
-                        .block();
-
-                // Print the response to the terminal
-                logger.info("Response from {}: {}", url, result);
-
-                return result; // Return the result if successful
-            } catch (WebClientResponseException e) {
-                logger.error("Error response from API: {} - Status code: {} - Body: {}", 
-                             url, e.getStatusCode(), e.getResponseBodyAsString());
-                break; // Exit the loop on error response
-            } catch (Exception e) {
-                attempts++;
-                logger.warn("Attempt {} failed for URL {}: {}", attempts, url, e.getMessage());
-                if (attempts >= MAX_RETRIES) {
-                    logger.error("Max retries reached for URL {}. Giving up on API call.", url);
-                }
-            }
+            // Print the response to the terminal
+            logger.info("Response from {}: {}", url, result);
+            return result; // Return the result if successful
+        } catch (WebClientResponseException e) {
+            logger.error("Error response from API: {} - Status code: {} - Body: {}", 
+                         url, e.getStatusCode(), e.getResponseBodyAsString());
+        } catch (Exception e) {
+            logger.error("Failed to fetch data from URL {}: {}", url, e.getMessage());
         }
-        return result; // Return null if all attempts fail
+        return null; // Return null if the fetch fails
     }
 
     private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
