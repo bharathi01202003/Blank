@@ -1,13 +1,8 @@
 package org.example.service;
 
-import org.example.model.File1Root;
-import org.example.model.File2Root;
-import org.example.model.MergedEntity;
-import org.example.model.File1Result;
-import org.example.model.File2Result;
+import org.example.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -21,8 +16,8 @@ import java.util.Optional;
 @Service
 public class DataService {
 
-    private final WebClient webClient;
     private static final Logger logger = LoggerFactory.getLogger(DataService.class);
+    private final WebClient webClient;
 
     @Value("${api.finance.url}")
     private String financeUrl;
@@ -30,17 +25,17 @@ public class DataService {
     @Value("${api.kyc.url}")
     private String kycUrl;
 
-    @Autowired
+    @Value("${api.auth.token}")
+    private String authToken;
+
     public DataService(WebClient.Builder webClientBuilder) {
         this.webClient = webClientBuilder.build();
     }
 
     public List<MergedEntity> fetchMergedData() {
-        // Fetch data from APIs
         File1Root financeData = fetch(financeUrl, File1Root.class);
         File2Root kycData = fetch(kycUrl, File2Root.class);
 
-        // Check if both data sources are not null before merging
         if (financeData != null && kycData != null) {
             return mergeData(financeData, kycData);
         } else {
@@ -54,33 +49,30 @@ public class DataService {
             logger.info("Fetching data from URL: {}", url);
             T result = webClient.get()
                     .uri(url)
-                    .header("Accept", "*/*;version=gamma")
-                    .header("Authorization", "Bearer " + System.getProperty("api.token"))
+                    .header("Accept", "application/json;version=gamma")
+                    .header("Authorization", "Bearer " + authToken)
                     .retrieve()
                     .bodyToMono(clazz)
                     .block();
 
-            // Print the response to the terminal
-            logger.info("Response from {}: {}", url, result);
-            return result; // Return the result if successful
+            logger.info("Fetched response from {}: {}", url, result);
+            return result;
         } catch (WebClientResponseException e) {
-            logger.error("Error response from API: {} - Status code: {} - Body: {}", 
-                         url, e.getStatusCode(), e.getResponseBodyAsString());
+            logger.error("API error at {}: {} - {}", url, e.getStatusCode(), e.getResponseBodyAsString(), e);
         } catch (Exception e) {
-            logger.error("Failed to fetch data from URL {}: {}", url, e.getMessage());
+            logger.error("Error fetching data from {}: {}", url, e.getMessage(), e);
         }
-        return null; // Return null if the fetch fails
+        return null;
     }
 
     private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
         List<MergedEntity> merged = new ArrayList<>();
 
         for (File1Result financeResult : financeData.getResults()) {
-            if (financeResult.getEntity() == null || financeResult.getEntity().getIdentifiers() == null) {
-                continue; // Skip if entity or identifiers are null
-            }
+            if (financeResult.getEntity() == null || financeResult.getEntity().getIdentifiers() == null) continue;
 
             Identifiers financeId = financeResult.getEntity().getIdentifiers();
+
             Optional<File2Result> match = kycData.getResults().stream()
                     .filter(kyc -> kyc.getIdentifiers() != null && !kyc.getIdentifiers().isEmpty() &&
                             financeId.getPtyId().equals(kyc.getIdentifiers().get(0).getPtyId()))
@@ -102,7 +94,7 @@ public class DataService {
             });
         }
 
-        logger.info("Merged {} entities from finance and KYC data.", merged.size());
+        logger.info("Merged {} entities from Finance and KYC APIs.", merged.size());
         return merged;
     }
 }
