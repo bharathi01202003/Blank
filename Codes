@@ -1,64 +1,127 @@
-package org.example.config;
+package org.example.service;
 
+import org.example.model.File1Root;
+import org.example.model.File2Root;
+import org.example.model.MergedEntity;
+import org.example.model.File1Result;
+import org.example.model.File2Result;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.http.HttpHeaders;
-import org.springframework.web.client.RestTemplate;
+import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
-import reactor.netty.http.client.HttpClient;
-import reactor.netty.http.client.ReactorClientHttpConnector;
-import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.InsecureTrustManagerFactory;
 
-import javax.net.ssl.X509TrustManager;
-import java.security.cert.X509Certificate;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
 
-@Configuration
-public class AppConfig {
+@Service
+public class DataService {
 
-    @Value("${api.auth.token}") // Assuming you have this property defined
-    private String authToken;
+    private final WebClient webClient;
+    private static final Logger logger = LoggerFactory.getLogger(DataService.class);
+    private static final int MAX_RETRIES = 3;
 
-    @Bean
-    public WebClient webClient() {
-        // Create a trust manager that does not validate certificate chains
-        X509TrustManager trustManager = new X509TrustManager() {
-            @Override
-            public void checkClientTrusted(X509Certificate[] chain, String authType) {
-                // Trust all client certificates
-            }
+    @Value("${api.finance.url}")
+    private String financeUrl;
 
-            @Override
-            public void checkServerTrusted(X509Certificate[] chain, String authType) {
-                // Trust all server certificates
-            }
+    @Value("${api.kyc.url}")
+    private String kycUrl;
 
-            @Override
-            public X509Certificate[] getAcceptedIssuers() {
-                return new X509Certificate[0]; // Return an empty array
-            }
-        };
-
-        // Build SSL context
-        SslContextBuilder sslContextBuilder = SslContextBuilder.forClient()
-                .trustManager(InsecureTrustManagerFactory.INSTANCE);
-
-        // Create HTTP client with SSL context
-        HttpClient httpClient = HttpClient.create()
-                .secure(sslContextSpec -> sslContextSpec.sslContext(sslContextBuilder))
-                .wiretap(true); // Enable logging for debugging
-
-        // Build and return the WebClient
-        return WebClient.builder()
-                .clientConnector(new ReactorClientHttpConnector(httpClient))
-                .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + authToken)
-                .defaultHeader(HttpHeaders.ACCEPT, "application/json")
-                .build();
+    @Autowired
+    public DataService(WebClient.Builder webClientBuilder) {
+        this.webClient = webClientBuilder.build();
     }
 
-    @Bean
-    public RestTemplate restTemplate() {
-        return new RestTemplate();
+    public List<MergedEntity> fetchMergedData() {
+        // Check DNS resolution
+        if (!checkDnsResolution("api-int.staging.echonet")) {
+            return Collections.emptyList(); // Exit if DNS resolution fails
+        }
+
+        File1Root financeData = fetch(financeUrl, File1Root.class);
+        File2Root kycData = fetch(kycUrl, File2Root.class);
+
+        return mergeData(financeData, kycData);
+    }
+
+    private boolean checkDnsResolution(String hostname) {
+        try {
+            InetAddress address = InetAddress.getByName(hostname);
+            logger.info("Resolved hostname: {}", address.getHostAddress());
+            return true;
+        } catch (IOException e) {
+            logger.error("Hostname could not be resolved: {}", hostname, e);
+            return false;
+        }
+    }
+
+    private <T> T fetch(String url, Class<T> clazz) {
+        int attempts = 0;
+        T result = null;
+
+        while (attempts < MAX_RETRIES) {
+            try {
+                result = webClient.get()
+                        .uri(url)
+                        .header("Accept", "*/*;version=gamma") // Add the Accept header
+                        .header("Authorization", "Bearer " + System.getProperty("api.token")) // Use the token from properties
+                        .retrieve()
+                        .bodyToMono(clazz)
+                        .block();
+                logger.info("Successfully fetched data from {}", url);
+                return result; // Return the result if successful
+            } catch (Exception e) {
+                attempts++;
+                logger.warn("Attempt {} failed for URL {}: {}", attempts, url, e.getMessage());
+                if (attempts >= MAX_RETRIES) {
+                    logger.error("Max retries reached for URL {}. Giving up on API call.", url);
+                }
+            }
+        }
+        return result; // Return null if all attempts fail
+    }
+
+    private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
+        if (financeData == null || kycData == null) {
+            logger.warn("One or both data sources are null. Returning empty list.");
+            return Collections.emptyList();
+        }
+
+        List<MergedEntity> merged = new ArrayList<>();
+
+        for (File1Result financeResult : financeData.getResults()) {
+            if (financeResult.getEntity() == null || financeResult.getEntity().getIdentifiers() == null) {
+                continue; // Skip if entity or identifiers are null
+            }
+
+            Identifiers financeId = financeResult.getEntity().getIdentifiers();
+            Optional<File2Result> match = kycData.getResults().stream()
+                    .filter(kyc -> kyc.getIdentifiers() != null && !kyc.getIdentifiers().isEmpty() &&
+                            financeId.getPtyId().equals(kyc.getIdentifiers().get(0).getPtyId()))
+                    .findFirst();
+
+            match.ifPresent(kyc -> {
+                MergedEntity mergedEntity = new MergedEntity();
+                mergedEntity.setIdentifiers(Collections.singletonList(financeId));
+                mergedEntity.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
+
+                KycData kycDataObj = kyc.getKycData();
+                if (kycDataObj != null) {
+                    mergedEntity.setKycSites(kycDataObj.getKycSites());
+                    mergedEntity.setKycSegment(kycDataObj.getKycSegment());
+                    mergedEntity.setRiskIndustry(kycDataObj.getRiskIndustry());
+                }
+
+                merged.add(mergedEntity);
+            });
+        }
+
+        logger.info("Merged {} entities from finance and KYC data.", merged.size());
+        return merged;
     }
 }
