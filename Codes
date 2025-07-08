@@ -1,53 +1,41 @@
-package org.example.service;
+package org.example.config;
 
+import io.netty.handler.proxy.ProxyConnectException;
+import io.netty.handler.proxy.Socks5ProxyHandler;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.ParameterizedTypeReference;
-import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.netty.http.client.HttpClient;
+import reactor.netty.transport.ProxyProvider;
 
-import java.util.Map;
+@Configuration
+public class AppConfig {
 
-@Service
-public class AuthService {
+    @Value("${system.proxy.enabled:false}")
+    private boolean proxyEnabled;
 
-    private final WebClient webClient;
+    @Value("${system.proxy.host:}")
+    private String proxyHost;
 
-    // Values from application.properties
-    @Value("${auth.basic.token}")
-    private String basicToken;
+    @Value("${system.proxy.port:0}")
+    private int proxyPort;
 
-    // Hardcoded IP-based URL to bypass DNS issue
-    private final String tokenUrl = "https://172.26.1.45/oauth2/v1/token?grant_type=client_credentials";
-    private final String realHostHeader = "api-uat.staging.echonet";
+    @Bean
+    public WebClient.Builder webClientBuilder() {
+        if (proxyEnabled && proxyHost != null && proxyPort > 0) {
+            HttpClient httpClient = HttpClient.create()
+                .proxy(proxy -> proxy
+                    .type(ProxyProvider.Proxy.HTTP)
+                    .host(proxyHost)
+                    .port(proxyPort)
+                );
 
-    public AuthService(WebClient.Builder builder) {
-        this.webClient = builder.build();
-    }
-
-    public String fetchToken() {
-        try {
-            // Split into declaration and assignment to help IDE understand
-            ParameterizedTypeReference<Map<String, Object>> typeRef =
-                    new ParameterizedTypeReference<>() {};
-
-            Map<String, Object> response = webClient.post()
-                    .uri(tokenUrl)
-                    .header("Host", realHostHeader)
-                    .header("Accept", "*/*;version=gamma")
-                    .header("Authorization", "Basic " + basicToken)
-                    .retrieve()
-                    .bodyToMono(typeRef)
-                    .block();
-
-            if (response != null && response.containsKey("access_token")) {
-                return (String) response.get("access_token");
-            } else {
-                System.err.println("⚠️ Token response missing 'access_token': " + response);
-                return null;
-            }
-        } catch (Exception e) {
-            System.err.println("❌ Auth token fetch failed: " + e.getMessage());
-            return null;
+            return WebClient.builder()
+                    .clientConnector(new ReactorClientHttpConnector(httpClient));
+        } else {
+            return WebClient.builder(); // No proxy
         }
     }
 }
