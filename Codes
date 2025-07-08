@@ -11,7 +11,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -41,10 +40,10 @@ public class DataService {
     public List<MergedEntity> fetchMergedData() {
         try {
             // Check DNS resolution
-            InetAddress address = InetAddress.getByName("api-int.staging");
+            InetAddress address = InetAddress.getByName("api-int.staging.echonet");
             logger.info("Resolved hostname: {}", address.getHostAddress());
         } catch (IOException e) {
-            logger.error("Hostname could not be resolved: api-int.staging", e);
+            logger.error("Hostname could not be resolved: api-int.staging.echonet", e);
             return Collections.emptyList(); // Exit if DNS resolution fails
         }
 
@@ -63,8 +62,8 @@ public class DataService {
             try {
                 result = webClient.get()
                         .uri(url)
-                        .header("Accept", "*/*;version=gamma") // Add the Accept header here
-                        .header("Authorization", "Bearer your_token_here") // Add your other headers here
+                        .header("Accept", "*/*;version=gamma") // Add the Accept header
+                        .header("Authorization", "Bearer " + System.getProperty("api.token")) // Use the token from properties
                         .retrieve()
                         .bodyToMono(clazz)
                         .block();
