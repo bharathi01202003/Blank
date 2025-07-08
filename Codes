@@ -12,8 +12,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
-import java.io.IOException;
-import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -38,25 +36,16 @@ public class DataService {
     }
 
     public List<MergedEntity> fetchMergedData() {
-        // Check DNS resolution
-        if (!checkDnsResolution("api-int.staging.echonet")) {
-            return Collections.emptyList(); // Exit if DNS resolution fails
-        }
-
+        // Fetch data from APIs
         File1Root financeData = fetch(financeUrl, File1Root.class);
         File2Root kycData = fetch(kycUrl, File2Root.class);
 
-        return mergeData(financeData, kycData);
-    }
-
-    private boolean checkDnsResolution(String hostname) {
-        try {
-            InetAddress address = InetAddress.getByName(hostname);
-            logger.info("Resolved hostname: {}", address.getHostAddress());
-            return true;
-        } catch (IOException e) {
-            logger.error("Hostname could not be resolved: {}", hostname, e);
-            return false;
+        // Check if both data sources are not null before merging
+        if (financeData != null && kycData != null) {
+            return mergeData(financeData, kycData);
+        } else {
+            logger.warn("One or both data sources are null. Returning empty list.");
+            return Collections.emptyList();
         }
     }
 
@@ -66,14 +55,18 @@ public class DataService {
 
         while (attempts < MAX_RETRIES) {
             try {
+                logger.info("Fetching data from URL: {}", url);
                 result = webClient.get()
                         .uri(url)
-                        .header("Accept", "*/*;version=gamma") // Add the Accept header
-                        .header("Authorization", "Bearer " + System.getProperty("api.token")) // Use the token from properties
+                        .header("Accept", "*/*;version=gamma")
+                        .header("Authorization", "Bearer " + System.getProperty("api.token"))
                         .retrieve()
                         .bodyToMono(clazz)
                         .block();
-                logger.info("Successfully fetched data from {}", url);
+
+                // Print the response to the terminal
+                logger.info("Response from {}: {}", url, result);
+
                 return result; // Return the result if successful
             } catch (Exception e) {
                 attempts++;
@@ -87,11 +80,6 @@ public class DataService {
     }
 
     private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
-        if (financeData == null || kycData == null) {
-            logger.warn("One or both data sources are null. Returning empty list.");
-            return Collections.emptyList();
-        }
-
         List<MergedEntity> merged = new ArrayList<>();
 
         for (File1Result financeResult : financeData.getResults()) {
