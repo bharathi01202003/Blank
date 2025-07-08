@@ -1,35 +1,161 @@
-package org.example;
+package org.example.service;
 
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.context.annotation.Bean;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
-@SpringBootApplication
-public class Main {
-    public static void main(String[] args) {
-        SpringApplication.run(Main.class, args);
+import java.util.Map;
+
+@Service
+public class AuthService {
+
+    private final WebClient webClient;
+
+    @Value("${auth.token.url}")
+    private String tokenUrl;
+
+    @Value("${auth.basic.token}")
+    private String basicToken;
+
+    public AuthService(WebClient.Builder builder) {
+        this.webClient = builder.build();
     }
 
-    @Bean
-    public WebClient.Builder webClientBuilder() {
-        return WebClient.builder();
-    }
+    public String getAccessToken() {
+        Map<String, Object> response = webClient.post()
+                .uri(tokenUrl)
+                .header("Accept", "*/*;version=gamma")
+                .header("Authorization", "Basic " + basicToken)
+                .retrieve()
+                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                .block();
 
-    @RestController
-    public static class DummyController {
-
-        private final WebClient webClient;
-
-        public DummyController(WebClient.Builder builder) {
-            this.webClient = builder.build();
-        }
-
-        @GetMapping("/get-token")
-        public String getToken() {
-            return "Dummy Token: dummy-token-1234";
+        if (response != null && response.containsKey("access_token")) {
+            return (String) response.get("access_token");
+        } else {
+            throw new RuntimeException("Failed to fetch auth token");
         }
     }
 }
+
+
+package org.example.service;
+
+import org.example.model.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.beans.factory.annotation.Value;
+
+import java.util.*;
+
+@Service
+public class DataService {
+
+    private final WebClient webClient;
+    private final AuthService authService;
+    private static final Logger logger = LoggerFactory.getLogger(DataService.class);
+
+    @Value("${api.finance.url}")
+    private String financeUrl;
+
+    @Value("${api.kyc.url}")
+    private String kycUrl;
+
+    public DataService(WebClient.Builder webClientBuilder, AuthService authService) {
+        this.webClient = webClientBuilder.build();
+        this.authService = authService;
+    }
+
+    public List<MergedEntity> fetchMergedData() {
+        String token = authService.getAccessToken();
+
+        File1Root financeData = fetch(financeUrl, File1Root.class, token);
+        File2Root kycData = fetch(kycUrl, File2Root.class, token);
+
+        if (financeData != null && kycData != null) {
+            return mergeData(financeData, kycData);
+        } else {
+            logger.warn("One or both APIs returned null.");
+            return Collections.emptyList();
+        }
+    }
+
+    private <T> T fetch(String url, Class<T> clazz, String token) {
+        try {
+            return webClient.get()
+                    .uri(url)
+                    .header("Accept", "*/*;version=gamma")
+                    .header("Authorization", "Bearer " + token)
+                    .retrieve()
+                    .bodyToMono(clazz)
+                    .block();
+        } catch (Exception e) {
+            logger.error("Error calling {}: {}", url, e.getMessage());
+            return null;
+        }
+    }
+
+    private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
+        List<MergedEntity> result = new ArrayList<>();
+
+        for (File1Result finance : financeData.getResults()) {
+            if (finance.getEntity() == null || finance.getEntity().getIdentifiers() == null) continue;
+
+            Identifiers financeId = finance.getEntity().getIdentifiers();
+            Optional<File2Result> match = kycData.getResults().stream()
+                    .filter(kyc -> kyc.getIdentifiers() != null && !kyc.getIdentifiers().isEmpty() &&
+                            financeId.getPtyId().equals(kyc.getIdentifiers().get(0).getPtyId()))
+                    .findFirst();
+
+            match.ifPresent(kyc -> {
+                MergedEntity merged = new MergedEntity();
+                merged.setIdentifiers(Collections.singletonList(financeId));
+                merged.setBusinessAddress(finance.getEntity().getBusinessAddress());
+
+                KycData kd = kyc.getKycData();
+                if (kd != null) {
+                    merged.setKycSites(kd.getKycSites());
+                    merged.setKycSegment(kd.getKycSegment());
+                    merged.setRiskIndustry(kd.getRiskIndustry());
+                }
+
+                result.add(merged);
+            });
+        }
+
+        return result;
+    }
+}
+
+
+
+
+package org.example.controller;
+
+import org.example.model.MergedEntity;
+import org.example.service.DataService;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
+
+@RestController
+public class MergerController {
+
+    private final DataService dataService;
+
+    public MergerController(DataService dataService) {
+        this.dataService = dataService;
+    }
+
+    @GetMapping("/merged-results")
+    public List<MergedEntity> getMergedResults() {
+        return dataService.fetchMergedData();
+    }
+}
+
+
+
