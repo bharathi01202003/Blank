@@ -12,13 +12,13 @@ public class AuthService {
 
     private final WebClient webClient;
 
-    // Inject values from application.properties
+    // Values from application.properties
     @Value("${auth.basic.token}")
     private String basicToken;
 
-    // Hardcoded IP for echonet, as DNS isn't resolving
-    private final String apiHost = "api-uat.staging.echonet";
+    // Hardcoded IP-based URL to bypass DNS issue
     private final String tokenUrl = "https://172.26.1.45/oauth2/v1/token?grant_type=client_credentials";
+    private final String realHostHeader = "api-uat.staging.echonet";
 
     public AuthService(WebClient.Builder builder) {
         this.webClient = builder.build();
@@ -26,16 +26,25 @@ public class AuthService {
 
     public String fetchToken() {
         try {
+            // Split into declaration and assignment to help IDE understand
+            ParameterizedTypeReference<Map<String, Object>> typeRef =
+                    new ParameterizedTypeReference<>() {};
+
             Map<String, Object> response = webClient.post()
-                    .uri(tokenUrl)                                // Call IP instead of hostname
-                    .header("Host", apiHost)                      // Spoof the Host header
+                    .uri(tokenUrl)
+                    .header("Host", realHostHeader)
                     .header("Accept", "*/*;version=gamma")
                     .header("Authorization", "Basic " + basicToken)
                     .retrieve()
-                    .bodyToMono(new ParameterizedTypeReference<>() {})
+                    .bodyToMono(typeRef)
                     .block();
 
-            return response != null ? (String) response.get("access_token") : null;
+            if (response != null && response.containsKey("access_token")) {
+                return (String) response.get("access_token");
+            } else {
+                System.err.println("⚠️ Token response missing 'access_token': " + response);
+                return null;
+            }
         } catch (Exception e) {
             System.err.println("❌ Auth token fetch failed: " + e.getMessage());
             return null;
