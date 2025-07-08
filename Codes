@@ -1,102 +1,36 @@
 package org.example.service;
 
-import org.example.model.*;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
-import org.springframework.web.reactive.function.client.WebClientResponseException;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Optional;
+import java.util.Map;
 
 @Service
-public class DataService {
+public class AuthService {
 
     private final WebClient webClient;
-    private final AuthService authService;
-    private static final Logger logger = LoggerFactory.getLogger(DataService.class);
 
-    @Value("${api.finance.url}")
-    private String financeUrl;
+    @Value("${auth.token.url}")
+    private String tokenUrl;
 
-    @Value("${api.kyc.url}")
-    private String kycUrl;
+    @Value("${auth.basic.token}")
+    private String basicToken;
 
-    public DataService(WebClient.Builder webClientBuilder, AuthService authService) {
-        this.webClient = webClientBuilder.build();
-        this.authService = authService;
+    public AuthService(WebClient.Builder builder) {
+        this.webClient = builder.build();
     }
 
-    public List<MergedEntity> fetchMergedData() {
-        File1Root financeData = fetch(financeUrl, File1Root.class);
-        File2Root kycData = fetch(kycUrl, File2Root.class);
+    public String fetchAuthToken() {
+        Map<String, String> response = webClient.post()
+            .uri(tokenUrl)
+            .header("Accept", "*/*;version=gamma")
+            .header("Authorization", "Basic " + basicToken)
+            .retrieve()
+            .bodyToMono(new ParameterizedTypeReference<Map<String, String>>() {})
+            .block();
 
-        if (financeData != null && kycData != null) {
-            return mergeData(financeData, kycData);
-        } else {
-            logger.warn("One or both data sources are null. Returning empty list.");
-            return Collections.emptyList();
-        }
-    }
-
-    private <T> T fetch(String url, Class<T> clazz) {
-        String token = authService.fetchAuthToken();
-
-        try {
-            logger.info("➡️ Fetching from: {}", url);
-
-            T result = webClient.get()
-                    .uri(url)
-                    .header("Accept", "application/json;version=gamma")
-                    .header("Authorization", "Bearer " + token)
-                    .retrieve()
-                    .bodyToMono(clazz)
-                    .block();
-
-            logger.info("✅ Response from {}: {}", url, result);
-            return result;
-        } catch (WebClientResponseException e) {
-            logger.error("❌ API error at {}: {} - {}", url, e.getStatusCode(), e.getResponseBodyAsString(), e);
-        } catch (Exception e) {
-            logger.error("❌ Failed to fetch from {}: {}", url, e.getMessage(), e);
-        }
-        return null;
-    }
-
-    private List<MergedEntity> mergeData(File1Root financeData, File2Root kycData) {
-        List<MergedEntity> merged = new ArrayList<>();
-
-        for (File1Result financeResult : financeData.getResults()) {
-            if (financeResult.getEntity() == null || financeResult.getEntity().getIdentifiers() == null) continue;
-
-            Identifiers financeId = financeResult.getEntity().getIdentifiers();
-
-            Optional<File2Result> match = kycData.getResults().stream()
-                    .filter(kyc -> kyc.getIdentifiers() != null && !kyc.getIdentifiers().isEmpty() &&
-                            financeId.getPtyId().equals(kyc.getIdentifiers().get(0).getPtyId()))
-                    .findFirst();
-
-            match.ifPresent(kyc -> {
-                MergedEntity mergedEntity = new MergedEntity();
-                mergedEntity.setIdentifiers(Collections.singletonList(financeId));
-                mergedEntity.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
-
-                KycData kycDataObj = kyc.getKycData();
-                if (kycDataObj != null) {
-                    mergedEntity.setKycSites(kycDataObj.getKycSites());
-                    mergedEntity.setKycSegment(kycDataObj.getKycSegment());
-                    mergedEntity.setRiskIndustry(kycDataObj.getRiskIndustry());
-                }
-
-                merged.add(mergedEntity);
-            });
-        }
-
-        logger.info("🔄 Merged {} entities successfully.", merged.size());
-        return merged;
+        return response != null ? response.get("access_token") : null;
     }
 }
