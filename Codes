@@ -1,3 +1,98 @@
+# API Configuration
+api.base-url=https://api-int.staging.echonet
+api.auth-path=/oauth2/v1/token?grant_type=client_credentials
+api.kyc-path=/ce-third-parties/v2/entities/kyc
+api.finance-path=/ce-third-parties/v2/entities/finance
+api.client.credentials=TUE2dH1jVEdFZjV3Tz1XbEdIR2RoVkdqakFnSXBPNE06NTVIWXBENjFIRWdJNThRRA==
+
+# DNS Configuration
+dns.nameservers=8.8.8.8,1.1.1.1
+dns.timeout=5000
+
+
+
+
+package org.example.config;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Configuration;
+
+import javax.annotation.PostConstruct;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.Properties;
+
+@Configuration
+public class DnsConfig {
+
+    @Value("${dns.nameservers}")
+    private String nameServers;
+    
+    @Value("${dns.timeout}")
+    private String timeout;
+
+    @PostConstruct
+    public void init() {
+        System.setProperty("sun.net.spi.nameservice.provider.1", "dns,sun");
+        System.setProperty("sun.net.spi.nameservice.nameservers", nameServers);
+        System.setProperty("sun.net.spi.nameservice.timeout", timeout);
+        
+        // Verify DNS resolution
+        try {
+            InetAddress.getByName("api-int.staging.echonet");
+        } catch (UnknownHostException e) {
+            throw new RuntimeException("DNS resolution failed for api-int.staging.echonet", e);
+        }
+    }
+}
+
+
+
+package org.example.config;
+
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.netty.http.client.HttpClient;
+
+import javax.net.ssl.SSLException;
+import java.time.Duration;
+
+@Configuration
+public class WebClientConfig {
+
+    @Value("${api.base-url}")
+    private String baseUrl;
+
+    @Bean
+    public WebClient webClient() throws SSLException {
+        SslContext sslContext = SslContextBuilder
+                .forClient()
+                .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                .build();
+
+        HttpClient httpClient = HttpClient.create()
+                .secure(t -> t.sslContext(sslContext))
+                .responseTimeout(Duration.ofSeconds(10));
+
+        return WebClient.builder()
+                .clientConnector(new ReactorClientHttpConnector(httpClient))
+                .baseUrl(baseUrl)
+                .defaultHeader("Accept", "*/*;version=gamma")
+                .build();
+    }
+}
+
+
+
+
+
+
 package org.example.service;
 
 import org.example.model.*;
@@ -7,11 +102,15 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.List;
+import java.util.logging.Logger;
 
 @Service
 public class EntityMergeService {
 
+    private static final Logger logger = Logger.getLogger(EntityMergeService.class.getName());
+    
     private final WebClient webClient;
     
     @Value("${api.client.credentials}")
@@ -29,24 +128,30 @@ public class EntityMergeService {
 
     public Mono<List<MergedEntity>> mergeAllEntities() {
         return getAccessToken()
-                .flatMap(token -> {
-                    Mono<File2Root> kycDataMono = getKycData(token);
-                    
-                    return kycDataMono.flatMapMany(kycRoot -> Flux.fromIterable(kycRoot.getResults()))
-                            .flatMap(kycResult -> {
-                                Integer kycId = extractKycId(kycResult);
-                                if (kycId == null) {
-                                    return Mono.empty();
-                                }
-                                return getFinanceData(kycId.toString(), token)
-                                        .map(financeRoot -> createMergedEntity(
-                                                financeRoot.getResults().isEmpty() ? null : financeRoot.getResults().get(0).getEntity(),
-                                                kycResult
-                                        ));
-                            })
-                            .filter(mergedEntity -> mergedEntity != null)
-                            .collectList();
-                });
+                .flatMap(this::processWithToken)
+                .timeout(Duration.ofSeconds(30))
+                .retry(3)
+                .doOnError(e -> logger.severe("Failed to merge entities: " + e.getMessage()));
+    }
+
+    private Mono<List<MergedEntity>> processWithToken(String token) {
+        return getKycData(token)
+                .flatMapMany(kycRoot -> Flux.fromIterable(kycRoot.getResults()))
+                .flatMap(kycResult -> processKycResult(kycResult, token))
+                .collectList();
+    }
+
+    private Mono<MergedEntity> processKycResult(File2Result kycResult, String token) {
+        return Mono.justOrEmpty(extractKycId(kycResult))
+                .flatMap(kycId -> getFinanceData(kycId.toString(), token)
+                        .map(financeRoot -> createMergedEntity(
+                                financeRoot.getResults().isEmpty() ? null : financeRoot.getResults().get(0).getEntity(),
+                                kycResult
+                        ))
+                        .onErrorResume(e -> {
+                            logger.warning("Skipping KYC record due to error: " + e.getMessage());
+                            return Mono.empty();
+                        }));
     }
 
     private Mono<String> getAccessToken() {
@@ -55,12 +160,16 @@ public class EntityMergeService {
                 .header("Authorization", "Basic " + clientCredentials)
                 .retrieve()
                 .bodyToMono(String.class)
-                .map(response -> {
-                    if (response.contains("access_token")) {
-                        return response.split("\"access_token\":\"")[1].split("\"")[0];
-                    }
-                    throw new RuntimeException("Failed to get access token");
-                });
+                .map(this::parseAccessToken)
+                .doOnSuccess(token -> logger.info("Successfully obtained access token"))
+                .doOnError(e -> logger.severe("Failed to obtain access token: " + e.getMessage()));
+    }
+
+    private String parseAccessToken(String response) {
+        if (response.contains("access_token")) {
+            return response.split("\"access_token\":\"")[1].split("\"")[0];
+        }
+        throw new RuntimeException("Access token not found in response");
     }
 
     private Mono<File2Root> getKycData(String accessToken) {
@@ -68,7 +177,8 @@ public class EntityMergeService {
                 .uri(kycPath)
                 .header("Authorization", "Bearer " + accessToken)
                 .retrieve()
-                .bodyToMono(File2Root.class);
+                .bodyToMono(File2Root.class)
+                .doOnError(e -> logger.severe("Failed to fetch KYC data: " + e.getMessage()));
     }
 
     private Mono<File1Root> getFinanceData(String kycId, String accessToken) {
@@ -79,7 +189,8 @@ public class EntityMergeService {
                         .build())
                 .header("Authorization", "Bearer " + accessToken)
                 .retrieve()
-                .bodyToMono(File1Root.class);
+                .bodyToMono(File1Root.class)
+                .doOnError(e -> logger.warning("Failed to fetch finance data for KYC ID " + kycId + ": " + e.getMessage()));
     }
 
     private Integer extractKycId(File2Result kycResult) {
@@ -107,3 +218,56 @@ public class EntityMergeService {
         return merged;
     }
 }
+
+
+
+package org.example.controller;
+
+import org.example.model.MergedEntity;
+import org.example.service.EntityMergeService;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Mono;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/entities")
+public class EntityController {
+
+    private final EntityMergeService entityMergeService;
+
+    public EntityController(EntityMergeService entityMergeService) {
+        this.entityMergeService = entityMergeService;
+    }
+
+    @GetMapping("/merged")
+    public Mono<List<MergedEntity>> getAllMergedEntities() {
+        return entityMergeService.mergeAllEntities();
+    }
+}
+
+
+
+
+package org.example;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class EntityMergeApplication {
+    public static void main(String[] args) {
+        // Set DNS properties before starting app
+        System.setProperty("sun.net.spi.nameservice.provider.1", "dns,sun");
+        System.setProperty("sun.net.spi.nameservice.nameservers", "8.8.8.8,1.1.1.1");
+        System.setProperty("sun.net.spi.nameservice.timeout", "5000");
+        
+        SpringApplication.run(EntityMergeApplication.class, args);
+    }
+}
+
+
+
+
