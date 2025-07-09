@@ -1,130 +1,210 @@
+package org.example.config;
+
+import javax.annotation.PostConstruct;
+import java.lang.reflect.Field;
+import java.net.InetAddress;
+import java.util.Map;
+
+public class CustomDnsFix {
+
+    private static final String TARGET_HOST = "api-int.staging.echonet";
+    private static final String TARGET_IP = "3.110.54.123"; // 🔁 Replace with the IP from `nslookup`
+
+    @PostConstruct
+    public void patchDns() {
+        try {
+            System.out.println("⏳ Forcing DNS resolution for: " + TARGET_HOST + " => " + TARGET_IP);
+            InetAddress fakeAddress = InetAddress.getByAddress(TARGET_HOST, InetAddress.getByName(TARGET_IP).getAddress());
+
+            Field addressCacheField = InetAddress.class.getDeclaredField("addressCache");
+            addressCacheField.setAccessible(true);
+            Object addressCache = addressCacheField.get(null);
+
+            Class<?> cacheClass = addressCache.getClass();
+            Field cacheMapField = cacheClass.getDeclaredField("cache");
+            cacheMapField.setAccessible(true);
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> cacheMap = (Map<String, Object>) cacheMapField.get(addressCache);
+            cacheMap.put(TARGET_HOST, fakeAddress);
+
+            System.out.println("✅ DNS Override applied successfully");
+
+        } catch (Exception e) {
+            System.err.println("❌ DNS override failed: \" + e.getMessage());\n        }\n    }\n}\n"
+        }
+    }
+}
+
+
+
+
 package org.example.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.example.dto.*;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
+@RequiredArgsConstructor
 public class DataService {
 
-    @Autowired
-    private WebClient.Builder webClientBuilder;
+    private final ObjectMapper objectMapper;
 
     @Value("${api.auth.dynamic-auth}")
     private String dynamicAuth;
 
-    private final String authUrl = "https://api-int.staging.echonet/oauth2/v1/token?grant_type=client_credentials";
+    private final WebClient webClient = WebClient.builder().build();
+
+    private final String tokenUrl = "https://api-int.staging.echonet/oauth2/v1/token?grant_type=client_credentials";
     private final String financeUrl = "https://api-int.staging.echonet/ce-third-parties/v2/batch-export?type=FinanceCH";
-    private final String kycUrl = "https://api-int.staging.echonet/ce-third-parties/v2/entities/kyc?kycId=255472";
+    private final String kycBaseUrl = "https://api-int.staging.echonet/ce-third-parties/v2/entities/kyc?kycId=";
 
-    public List<MergedEntity> fetchAndMergeData() {
-        List<MergedEntity> mergedList = new ArrayList<>();
+    public List<MergedEntity> getMergedEntities() {
+        List<MergedEntity> resultList = new ArrayList<>();
 
         try {
-            System.out.println("Calling AUTH URL: " + authUrl);
-            System.out.println("Using dynamic Basic auth: " + dynamicAuth);
-
-            String token = fetchAuthToken();
+            // 🔐 Fetch access token
+            String token = fetchAccessToken();
             if (token == null || token.isEmpty()) {
-                System.err.println("Token is null or empty");
-                return mergedList;
+                log.error("Failed to retrieve access token.");
+                return resultList;
             }
 
-            System.out.println("Access token received: " + token);
-
-            File1Root financeRoot = fetchFinanceData(token);
-            File2Root kycRoot = fetchKycData(token);
-
-            if (financeRoot == null || kycRoot == null
-                    || financeRoot.getResults() == null || kycRoot.getResults() == null) {
-                System.err.println("Either finance or kyc data is null");
-                return mergedList;
-            }
-
-            mergedList = financeRoot.getResults().stream()
-                    .map(File1Result::getEntity)
-                    .filter(financeEntity -> financeEntity.getIdentifiers() != null && financeEntity.getIdentifiers().getKycId() != null)
-                    .flatMap(financeEntity -> {
-                        Integer kycId = financeEntity.getIdentifiers().getKycId();
-                        return kycRoot.getResults().stream()
-                                .filter(kycResult -> kycResult.getIdentifiers().stream().anyMatch(id -> id.getKycId().equals(kycId)))
-                                .map(matchedKyc -> {
-                                    KycData kycData = matchedKyc.getKycData();
-                                    return new MergedEntity(
-                                            Collections.singletonList(financeEntity.getIdentifiers()),
-                                            financeEntity.getBusinessAddress(),
-                                            kycData.getKycSites(),
-                                            kycData.getKycSegment(),
-                                            kycData.getRiskIndustry()
-                                    );
-                                });
-                    })
-                    .collect(Collectors.toList());
-
-        } catch (Exception e) {
-            System.err.println("Error during fetch and merge: " + e.getMessage());
-            e.printStackTrace();
-        }
-
-        return mergedList;
-    }
-
-    private String fetchAuthToken() {
-        try {
-            String response = webClientBuilder.build()
-                    .post()
-                    .uri(authUrl)
-                    .header(HttpHeaders.ACCEPT, "*/*;version=gamma")
-                    .header(HttpHeaders.AUTHORIZATION, dynamicAuth)
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .block();
-
-            JsonNode json = new ObjectMapper().readTree(response);
-            return json.has("access_token") ? json.get("access_token").asText() : null;
-        } catch (Exception e) {
-            System.err.println("Error fetching token: " + e.getMessage());
-            return null;
-        }
-    }
-
-    private File1Root fetchFinanceData(String token) {
-        try {
-            return webClientBuilder.build()
-                    .get()
+            // 📥 Fetch Finance API
+            File1Root financeRoot = webClient.get()
                     .uri(financeUrl)
                     .header(HttpHeaders.ACCEPT, "*/*;version=gamma")
                     .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
                     .retrieve()
                     .bodyToMono(File1Root.class)
                     .block();
-        } catch (Exception e) {
-            System.err.println("Error fetching Finance data: " + e.getMessage());
-            return null;
+
+            if (financeRoot == null || financeRoot.getResults() == null) {
+                log.warn("No finance data found.");
+                return resultList;
+            }
+
+            // 🔁 Loop through Finance records
+            for (File1Result financeResult : financeRoot.getResults()) {
+                Identifiers financeId = financeResult.getEntity().getIdentifiers();
+                Integer kycId = financeId.getKycId();
+
+                // 🔎 Call KYC API
+                File2Root kycRoot = webClient.get()
+                        .uri(kycBaseUrl + kycId)
+                        .header(HttpHeaders.ACCEPT, "*/*;version=gamma")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                        .retrieve()
+                        .bodyToMono(File2Root.class)
+                        .onErrorResume(e -> {
+                            log.error("Failed fetching KYC for kycId=" + kycId, e);
+                            return Mono.empty();
+                        })
+                        .block();
+
+                if (kycRoot == null || kycRoot.getResults() == null) {
+                    log.warn("KYC not found for kycId={}", kycId);
+                    continue;
+                }
+
+                // 🔗 Merge records
+                List<MergedEntity> mergedForThisKyc = kycRoot.getResults().stream()
+                        .map(file2Result -> {
+                            KycData kycData = file2Result.getKycData();
+                            MergedEntity merged = new MergedEntity();
+                            merged.setIdentifiers(List.of(financeId));
+                            merged.setBusinessAddress(financeResult.getEntity().getBusinessAddress());
+                            merged.setKycSites(kycData.getKycSites());
+                            merged.setKycSegment(kycData.getKycSegment());
+                            merged.setRiskIndustry(kycData.getRiskIndustry());
+                            return merged;
+                        })
+                        .collect(Collectors.toList());
+
+                resultList.addAll(mergedForThisKyc);
+            }
+
+        } catch (Exception ex) {
+            log.error("Unexpected error occurred while merging data", ex);
         }
+
+        return resultList;
     }
 
-    private File2Root fetchKycData(String token) {
+    private String fetchAccessToken() {
         try {
-            return webClientBuilder.build()
-                    .get()
-                    .uri(kycUrl)
+            String response = webClient.post()
+                    .uri(tokenUrl)
                     .header(HttpHeaders.ACCEPT, "*/*;version=gamma")
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                    .header(HttpHeaders.AUTHORIZATION, dynamicAuth)
                     .retrieve()
-                    .bodyToMono(File2Root.class)
+                    .bodyToMono(String.class)
                     .block();
+
+            if (response == null) {
+                log.error("Auth response is null");
+                return null;
+            }
+
+            return objectMapper.readTree(response).path("access_token").asText();
+
         } catch (Exception e) {
-            System.err.println("Error fetching KYC data: " + e.getMessage());
+            log.error("❌ Error fetching token: ", e);
             return null;
         }
     }
 }
+
+
+
+
+
+
+package org.example.controller;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.example.dto.MergedEntity;
+import org.example.service.DataService;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@Slf4j
+@RestController
+@RequiredArgsConstructor
+@RequestMapping("/api")
+public class KycController {
+
+    private final DataService dataService;
+
+    @GetMapping("/merged")
+    public ResponseEntity<List<MergedEntity>> getMergedResults() {
+        log.info("🔍 Merging Finance and KYC data...");
+        List<MergedEntity> mergedEntities = dataService.getMergedEntities();
+
+        if (mergedEntities.isEmpty()) {
+            log.warn("⚠️ No merged data found.");
+            return ResponseEntity.ok().body(List.of());
+        }
+
+        log.info("✅ Successfully merged {} entities", mergedEntities.size());
+        return ResponseEntity.ok(mergedEntities);
+    }
+}
+
+
