@@ -1,40 +1,188 @@
-import org.apache.http.conn.ssl.NoopHostnameVerifier;
-import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
-import org.apache.http.conn.ssl.TrustStrategy;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClients;
+package org.example.config;
+
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
-import org.springframework.web.client.RestTemplate;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.netty.http.client.HttpClient;
 
-import javax.net.ssl.SSLContext;
-import java.security.KeyManagementException;
-import java.security.KeyStoreException;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.X509Certificate;
+import javax.net.ssl.SSLException;
 
 @Configuration
-public class RestTemplateConfig {
+public class WebClientConfig {
+
+    @Value("${api.base-url}")
+    private String baseUrl;
 
     @Bean
-    public RestTemplate restTemplate() throws KeyStoreException, NoSuchAlgorithmException, KeyManagementException {
-        TrustStrategy acceptingTrustStrategy = (X509Certificate[] chain, String authType) -> true;
-
-        SSLContext sslContext = org.apache.http.ssl.SSLContexts.custom()
-                .loadTrustMaterial(null, acceptingTrustStrategy)
+    public WebClient webClient() throws SSLException {
+        SslContext sslContext = SslContextBuilder
+                .forClient()
+                .trustManager(InsecureTrustManagerFactory.INSTANCE)
                 .build();
 
-        SSLConnectionSocketFactory csf = new SSLConnectionSocketFactory(sslContext, NoopHostnameVerifier.INSTANCE);
+        HttpClient httpClient = HttpClient.create()
+                .secure(t -> t.sslContext(sslContext));
 
-        CloseableHttpClient httpClient = HttpClients.custom()
-                .setSSLSocketFactory(csf)
+        return WebClient.builder()
+                .baseUrl(baseUrl)
+                .clientConnector(new ReactorClientHttpConnector(httpClient))
+                .defaultHeader("Accept", "*/*;version=gamma")
                 .build();
-
-        HttpComponentsClientHttpRequestFactory requestFactory =
-                new HttpComponentsClientHttpRequestFactory();
-
-        requestFactory.setHttpClient(httpClient);
-        return new RestTemplate(requestFactory);
     }
 }
+
+
+
+
+
+
+package org.example.service;
+
+import org.example.model.*;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+public class EntityMergeService {
+
+    private final WebClient webClient;
+    
+    @Value("${api.client.credentials}")
+    private String clientCredentials;
+    @Value("${api.auth-path}")
+    private String authPath;
+    @Value("${api.kyc-path}")
+    private String kycPath;
+    @Value("${api.finance-path}")
+    private String financePath;
+
+    public EntityMergeService(WebClient webClient) {
+        this.webClient = webClient;
+    }
+
+    public Mono<List<MergedEntity>> mergeAllEntities() {
+        return getAccessToken()
+                .flatMap(token -> getKycData(token)
+                        .flatMap(kycRoot -> Mono.just(kycRoot.getResults().stream()
+                                .map(kycResult -> {
+                                    Integer kycId = extractKycId(kycResult);
+                                    if (kycId != null) {
+                                        return getFinanceData(kycId.toString(), token)
+                                                .map(financeRoot -> createMergedEntity(
+                                                        financeRoot.getResults().get(0).getEntity(),
+                                                        kycResult
+                                                ));
+                                    }
+                                    return Mono.<MergedEntity>empty();
+                                })
+                                .collect(Collectors.toList()))
+                        )
+                )
+                .flatMap(monoList -> Mono.zip(monoList, objects -> 
+                        List.of(Arrays.stream(objects)
+                                .map(obj -> (MergedEntity) obj)
+                                .collect(Collectors.toList())
+                ));
+    }
+
+    private Mono<String> getAccessToken() {
+        return webClient.post()
+                .uri(authPath)
+                .header("Authorization", "Basic " + clientCredentials)
+                .retrieve()
+                .bodyToMono(String.class)
+                .map(response -> {
+                    if (response.contains("access_token")) {
+                        return response.split("\"access_token\":\"")[1].split("\"")[0];
+                    }
+                    throw new RuntimeException("Failed to get access token");
+                });
+    }
+
+    private Mono<File2Root> getKycData(String accessToken) {
+        return webClient.get()
+                .uri(kycPath)
+                .header("Authorization", "Bearer " + accessToken)
+                .retrieve()
+                .bodyToMono(File2Root.class);
+    }
+
+    private Mono<File1Root> getFinanceData(String kycId, String accessToken) {
+        return webClient.get()
+                .uri(uriBuilder -> uriBuilder
+                        .path(financePath)
+                        .queryParam("kycId", kycId)
+                        .build())
+                .header("Authorization", "Bearer " + accessToken)
+                .retrieve()
+                .bodyToMono(File1Root.class);
+    }
+
+    private Integer extractKycId(File2Result kycResult) {
+        return kycResult.getIdentifiers().stream()
+                .map(Identifiers::getKycId)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private MergedEntity createMergedEntity(Entity financeEntity, File2Result kycResult) {
+        MergedEntity merged = new MergedEntity();
+        merged.setIdentifiers(kycResult.getIdentifiers());
+        merged.setBusinessAddress(financeEntity.getBusinessAddress());
+        
+        if (kycResult.getKycData() != null) {
+            merged.setKycSites(kycResult.getKycData().getKycSites());
+            merged.setKycSegment(kycResult.getKycData().getKycSegment());
+            merged.setRiskIndustry(kycResult.getKycData().getRiskIndustry());
+        }
+        
+        return merged;
+    }
+}
+
+
+
+
+package org.example.controller;
+
+import org.example.model.MergedEntity;
+import org.example.service.EntityMergeService;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Mono;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/entities")
+public class EntityController {
+
+    private final EntityMergeService entityMergeService;
+
+    public EntityController(EntityMergeService entityMergeService) {
+        this.entityMergeService = entityMergeService;
+    }
+
+    @GetMapping("/merged")
+    public Mono<List<MergedEntity>> getAllMergedEntities() {
+        return entityMergeService.mergeAllEntities();
+    }
+}
+
+
+
+
+
+
+
