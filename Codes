@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.dto.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
+import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
@@ -23,37 +23,41 @@ public class DataService {
 
     private final String authUrl = "https://api-int.staging.echonet/oauth2/v1/token?grant_type=client_credentials";
     private final String financeUrl = "https://api-int.staging.echonet/ce-third-parties/v2/batch-export?type=FinanceCH";
-    private final String kycUrl = "https://api-int.staging.echonet/ce-third-parties/v2/entities/kyc?ptyId=69";
+    private final String kycUrl = "https://api-int.staging.echonet/ce-third-parties/v2/entities/kyc?kycId=255472";
 
     public List<MergedEntity> fetchAndMergeData() {
         List<MergedEntity> mergedList = new ArrayList<>();
 
         try {
-            // Step 1: Fetch Bearer Token
+            System.out.println("Calling AUTH URL: " + authUrl);
+            System.out.println("Using dynamic Basic auth: " + dynamicAuth);
+
             String token = fetchAuthToken();
-            if (token == null) return mergedList;
+            if (token == null || token.isEmpty()) {
+                System.err.println("Token is null or empty");
+                return mergedList;
+            }
 
-            // Step 2: Call Finance API
+            System.out.println("Access token received: " + token);
+
             File1Root financeRoot = fetchFinanceData(token);
-            if (financeRoot == null || financeRoot.getResults() == null) return mergedList;
-
-            // Step 3: Call KYC API
             File2Root kycRoot = fetchKycData(token);
-            if (kycRoot == null || kycRoot.getResults() == null) return mergedList;
 
-            // Step 4: Merge Data based on kycId
+            if (financeRoot == null || kycRoot == null
+                    || financeRoot.getResults() == null || kycRoot.getResults() == null) {
+                System.err.println("Either finance or kyc data is null");
+                return mergedList;
+            }
+
             mergedList = financeRoot.getResults().stream()
                     .map(File1Result::getEntity)
-                    .filter(entity -> entity.getIdentifiers() != null && entity.getIdentifiers().getKycId() != null)
+                    .filter(financeEntity -> financeEntity.getIdentifiers() != null && financeEntity.getIdentifiers().getKycId() != null)
                     .flatMap(financeEntity -> {
-                        Integer financeKycId = financeEntity.getIdentifiers().getKycId();
-
+                        Integer kycId = financeEntity.getIdentifiers().getKycId();
                         return kycRoot.getResults().stream()
-                                .filter(kycResult -> kycResult.getIdentifiers().stream()
-                                        .anyMatch(kid -> financeKycId.equals(kid.getKycId())))
+                                .filter(kycResult -> kycResult.getIdentifiers().stream().anyMatch(id -> id.getKycId().equals(kycId)))
                                 .map(matchedKyc -> {
                                     KycData kycData = matchedKyc.getKycData();
-
                                     return new MergedEntity(
                                             Collections.singletonList(financeEntity.getIdentifiers()),
                                             financeEntity.getBusinessAddress(),
@@ -66,7 +70,7 @@ public class DataService {
                     .collect(Collectors.toList());
 
         } catch (Exception e) {
-            System.err.println("Error during data merge: " + e.getMessage());
+            System.err.println("Error during fetch and merge: " + e.getMessage());
             e.printStackTrace();
         }
 
@@ -97,6 +101,7 @@ public class DataService {
             return webClientBuilder.build()
                     .get()
                     .uri(financeUrl)
+                    .header(HttpHeaders.ACCEPT, "*/*;version=gamma")
                     .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
                     .retrieve()
                     .bodyToMono(File1Root.class)
@@ -112,6 +117,7 @@ public class DataService {
             return webClientBuilder.build()
                     .get()
                     .uri(kycUrl)
+                    .header(HttpHeaders.ACCEPT, "*/*;version=gamma")
                     .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
                     .retrieve()
                     .bodyToMono(File2Root.class)
