@@ -1,3 +1,55 @@
+// Main.java
+package org.example;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class Main {
+    public static void main(String[] args) {
+        SpringApplication.run(Main.class, args);
+    }
+}
+
+// AppConfig.java
+package org.example.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.reactive.function.client.WebClient;
+
+@Configuration
+public class AppConfig {
+    @Bean
+    public WebClient.Builder webClientBuilder() {
+        return WebClient.builder();
+    }
+}
+
+// MergeController.java
+package org.example.controller;
+
+import org.example.dto.MergedEntity;
+import org.example.service.DataService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api")
+public class MergeController {
+
+    @Autowired
+    private DataService dataService;
+
+    @GetMapping("/merge")
+    public List<MergedEntity> getMergedEntities() {
+        return dataService.fetchAndMergeData();
+    }
+}
+
+// DataService.java
 package org.example.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,11 +68,9 @@ public class DataService {
     @Autowired
     private WebClient.Builder webClientBuilder;
 
-    private final String authUrl = "https://api-uat.staging.echonet/oauth2/v1/token?grant_type=client_credentials";
+    private final String authUrl = "https://api-int.staging.echonet/oauth2/v1/token?grant_type=client_credentials";
     private final String financeUrl = "https://api-int.staging.echonet/ce-third-parties/v2/batch-export?type=FinanceCH";
     private final String kycUrl = "https://api-int.staging.echonet/ce-third-parties/v2/entities/kyc?ptyId=69";
-
-    private final String clientId = "yourClientId";
 
     public List<MergedEntity> fetchAndMergeData() {
         String token = fetchAuthToken();
@@ -57,20 +107,18 @@ public class DataService {
 
     private String fetchAuthToken() {
         try {
-            String requestBody = "client_id=" + clientId;
-
             String response = webClientBuilder.build()
                     .post()
                     .uri(authUrl)
-                    .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_FORM_URLENCODED_VALUE)
-                    .bodyValue(requestBody)
+                    .header(HttpHeaders.ACCEPT, "*/*;version=gamma")
+                    .header(HttpHeaders.AUTHORIZATION, "Basic TUE2dH1jVEdFZjV3Tz1XbEdIR2RoVkdqakFnSXBPNE06NTVIWXBENFIRWdJNThRRA==")
                     .retrieve()
                     .bodyToMono(String.class)
                     .block();
 
             return new ObjectMapper().readTree(response).get("access_token").asText();
         } catch (Exception e) {
-            e.printStackTrace();
+            System.err.println("Error fetching token: " + e.getMessage());
             return null;
         }
     }
