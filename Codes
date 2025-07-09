@@ -1,56 +1,13 @@
-package org.example.config;
-
-import io.netty.handler.ssl.SslContext;
-import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.http.client.reactive.ReactorClientHttpConnector;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.netty.http.client.HttpClient;
-
-import javax.net.ssl.SSLException;
-
-@Configuration
-public class WebClientConfig {
-
-    @Value("${api.base-url}")
-    private String baseUrl;
-
-    @Bean
-    public WebClient webClient() throws SSLException {
-        SslContext sslContext = SslContextBuilder
-                .forClient()
-                .trustManager(InsecureTrustManagerFactory.INSTANCE)
-                .build();
-
-        HttpClient httpClient = HttpClient.create()
-                .secure(t -> t.sslContext(sslContext));
-
-        return WebClient.builder()
-                .baseUrl(baseUrl)
-                .clientConnector(new ReactorClientHttpConnector(httpClient))
-                .defaultHeader("Accept", "*/*;version=gamma")
-                .build();
-    }
-}
-
-
-
-
-
-
 package org.example.service;
 
 import org.example.model.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.stream.Collectors;
 
 @Service
 public class EntityMergeService {
@@ -72,27 +29,24 @@ public class EntityMergeService {
 
     public Mono<List<MergedEntity>> mergeAllEntities() {
         return getAccessToken()
-                .flatMap(token -> getKycData(token)
-                        .flatMap(kycRoot -> Mono.just(kycRoot.getResults().stream()
-                                .map(kycResult -> {
-                                    Integer kycId = extractKycId(kycResult);
-                                    if (kycId != null) {
-                                        return getFinanceData(kycId.toString(), token)
-                                                .map(financeRoot -> createMergedEntity(
-                                                        financeRoot.getResults().get(0).getEntity(),
-                                                        kycResult
-                                                ));
-                                    }
-                                    return Mono.<MergedEntity>empty();
-                                })
-                                .collect(Collectors.toList()))
-                        )
-                )
-                .flatMap(monoList -> Mono.zip(monoList, objects -> 
-                        List.of(Arrays.stream(objects)
-                                .map(obj -> (MergedEntity) obj)
-                                .collect(Collectors.toList())
-                ));
+                .flatMap(token -> {
+                    Mono<File2Root> kycDataMono = getKycData(token);
+                    
+                    return kycDataMono.flatMapMany(kycRoot -> Flux.fromIterable(kycRoot.getResults()))
+                            .flatMap(kycResult -> {
+                                Integer kycId = extractKycId(kycResult);
+                                if (kycId == null) {
+                                    return Mono.empty();
+                                }
+                                return getFinanceData(kycId.toString(), token)
+                                        .map(financeRoot -> createMergedEntity(
+                                                financeRoot.getResults().isEmpty() ? null : financeRoot.getResults().get(0).getEntity(),
+                                                kycResult
+                                        ));
+                            })
+                            .filter(mergedEntity -> mergedEntity != null)
+                            .collectList();
+                });
     }
 
     private Mono<String> getAccessToken() {
@@ -136,6 +90,10 @@ public class EntityMergeService {
     }
 
     private MergedEntity createMergedEntity(Entity financeEntity, File2Result kycResult) {
+        if (financeEntity == null) {
+            return null;
+        }
+        
         MergedEntity merged = new MergedEntity();
         merged.setIdentifiers(kycResult.getIdentifiers());
         merged.setBusinessAddress(financeEntity.getBusinessAddress());
@@ -149,40 +107,3 @@ public class EntityMergeService {
         return merged;
     }
 }
-
-
-
-
-package org.example.controller;
-
-import org.example.model.MergedEntity;
-import org.example.service.EntityMergeService;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-import reactor.core.publisher.Mono;
-
-import java.util.List;
-
-@RestController
-@RequestMapping("/api/entities")
-public class EntityController {
-
-    private final EntityMergeService entityMergeService;
-
-    public EntityController(EntityMergeService entityMergeService) {
-        this.entityMergeService = entityMergeService;
-    }
-
-    @GetMapping("/merged")
-    public Mono<List<MergedEntity>> getAllMergedEntities() {
-        return entityMergeService.mergeAllEntities();
-    }
-}
-
-
-
-
-
-
-
