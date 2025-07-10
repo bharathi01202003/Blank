@@ -101,9 +101,16 @@ public class DataService {
             return null;
         }
 
-        JsonNode kycData = results.get(0).path("kycData"); // ✅ Corrected path
+        JsonNode kycData = results.get(0).path("kycData");
 
-        List<KycSites> kycSites = mapper.convertValue(kycData.path("kycSites"), new TypeReference<>() {});
+        // ✅ Robust parsing of kycSites
+        JsonNode kycSitesNode = kycData.path("kycSites");
+        System.out.println("🔎 kycSites raw JSON: " + kycSitesNode.toPrettyString());
+
+        List<KycSites> kycSites = kycSitesNode.isArray()
+                ? mapper.convertValue(kycSitesNode, new TypeReference<>() {})
+                : Collections.emptyList();
+
         String kycSegment = kycData.path("kycSegment").asText(null);
         List<RiskIndustry> riskIndustry = mapper.convertValue(kycData.path("riskIndustry"), new TypeReference<>() {});
 
