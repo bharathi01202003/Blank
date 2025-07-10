@@ -25,7 +25,7 @@ public class DataService {
     private String financeChUrl;
 
     @Value("${api.kyc.url}")
-    private String kycUrl;                          // e.g. https://api-int.staging.echonet/ce-third-parties/v2/entities/kyc
+    private String kycUrl;
 
     @Value("${auth.token.url}")
     private String authTokenUrl;
@@ -40,8 +40,6 @@ public class DataService {
         this.mapper = new ObjectMapper();
     }
 
-    /* ────────────────────────────────────────── TOKEN ───────────────────────────────────────── */
-
     private void fetchAuthToken() {
         try {
             HttpHeaders headers = new HttpHeaders();
@@ -49,72 +47,71 @@ public class DataService {
             headers.set("Authorization", basicAuth);
             headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
 
-            ResponseEntity<String> response =
-                    restTemplate.postForEntity(authTokenUrl, new HttpEntity<>("", headers), String.class);
+            HttpEntity<String> request = new HttpEntity<>("", headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(authTokenUrl, request, String.class);
 
             if (!response.getStatusCode().is2xxSuccessful()) {
                 throw new RuntimeException("Auth token API returned error: " + response.getStatusCode());
             }
 
-            this.token = mapper.readTree(response.getBody()).path("access_token").asText();
+            JsonNode json = mapper.readTree(response.getBody());
+            this.token = json.path("access_token").asText();
+
             if (token == null || token.isBlank()) {
-                throw new RuntimeException("Token not present in auth response");
+                throw new RuntimeException("Token not found in auth response");
             }
 
+            System.out.println("✅ Auth token fetched.");
         } catch (Exception e) {
             throw new RuntimeException("Failed to fetch token: " + e.getMessage(), e);
         }
     }
 
-    /* ─────────────────────────────── MAIN MERGE METHOD ─────────────────────────────── */
-
     public List<MergedEntity> getMergedEntities() {
+        fetchAuthToken();
 
-        fetchAuthToken();                                  // ① get token once
-
-        // ② pull FinanceCH results
         JsonNode financeResults = fetchJson(financeChUrl).path("results");
-        System.out.println("Finance results: " + financeResults.size());
+        System.out.println("✅ Total Finance results: " + financeResults.size());
 
-        // ③ extract every ptyId in one pass
         List<String> ptyIds = StreamSupport.stream(financeResults.spliterator(), false)
                 .map(r -> r.path("entity").path("identifiers").path("ptyId").asText())
                 .filter(id -> id != null && !id.isBlank())
                 .collect(Collectors.toList());
 
-        // ④ for each ptyId build merged object
         return ptyIds.stream()
-                .flatMap(ptyId -> mergeForPtyId(financeResults, ptyId))   // returns Stream<MergedEntity> (0 or 1)
+                .flatMap(ptyId -> mergeForPtyId(financeResults, ptyId))
                 .collect(Collectors.toList());
     }
 
-    /* ────────────────────────── HELPER: merge for one ptyId ────────────────────────── */
-
     private Stream<MergedEntity> mergeForPtyId(JsonNode financeResults, String ptyId) {
+        System.out.println("🔹 Checking ptyId: " + ptyId);
 
-        // a) find the first finance result whose identifiers.ptyId == ptyId
         JsonNode financeMatch = StreamSupport.stream(financeResults.spliterator(), false)
                 .filter(r -> ptyId.equals(r.path("entity").path("identifiers").path("ptyId").asText()))
                 .findFirst()
                 .orElse(null);
 
-        if (financeMatch == null) return Stream.empty();   // shouldn’t happen
+        if (financeMatch == null) {
+            System.out.println("❌ No finance match for ptyId: " + ptyId);
+            return Stream.empty();
+        }
 
-        BusinessAddress businessAddress =
-                mapper.convertValue(financeMatch.path("entity").path("businessAddress"), BusinessAddress.class);
+        BusinessAddress businessAddress = mapper.convertValue(
+                financeMatch.path("entity").path("businessAddress"), BusinessAddress.class);
 
-        Identifiers identifiers =
-                mapper.convertValue(financeMatch.path("entity").path("identifiers"), Identifiers.class);
+        Identifiers identifiers = mapper.convertValue(
+                financeMatch.path("entity").path("identifiers"), Identifiers.class);
 
-        // b) call KYC endpoint for that ptyId
         String kycEndpoint = kycUrl + "?ptyId=" + ptyId;
         JsonNode kycRoot = fetchJson(kycEndpoint);
+        System.out.println("➡ KYC URL: " + kycEndpoint);
+        System.out.println("⬅ KYC Raw Response: " + kycRoot.toPrettyString());
 
-        // KYC may return empty body or empty results → skip merge
-        if (kycRoot.isMissingNode() || kycRoot.isEmpty()) return Stream.empty();
-
-        JsonNode kycEntity = kycRoot.path("entity");       // adapt if your JSON is "results[0].entity"
-        if (kycEntity.isMissingNode()) return Stream.empty();
+        JsonNode kycEntity = kycRoot.path("entity");
+        if (kycEntity.isMissingNode() || kycEntity.isEmpty()) {
+            System.out.println("⚠️ No KYC data for ptyId: " + ptyId);
+            return Stream.empty();
+        }
 
         List<KycSites> kycSites = mapper.convertValue(
                 kycEntity.path("kycSites"),
@@ -136,31 +133,27 @@ public class DataService {
                 riskIndustry
         );
 
+        System.out.println("✅ MergedEntity created for ptyId: " + ptyId);
         return Stream.of(merged);
     }
-
-    /* ──────────────────────────── HELPER: fetch JSON ──────────────────────────── */
 
     private JsonNode fetchJson(String url) {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(this.token);
         headers.add("Accept", "*/*;version=gamma");
 
-        ResponseEntity<String> res = restTemplate.exchange(
-                url,
-                HttpMethod.GET,
-                new HttpEntity<>(headers),
-                String.class
-        );
+        HttpEntity<String> request = new HttpEntity<>(headers);
+        ResponseEntity<String> response = restTemplate.exchange(
+                url, HttpMethod.GET, request, String.class);
 
-        if (!res.getStatusCode().is2xxSuccessful()) {
-            throw new RuntimeException("GET " + url + " returned " + res.getStatusCode());
+        if (!response.getStatusCode().is2xxSuccessful()) {
+            throw new RuntimeException("GET " + url + " failed: " + response.getStatusCode());
         }
 
         try {
-            return mapper.readTree(res.getBody());
+            return mapper.readTree(response.getBody());
         } catch (Exception e) {
-            throw new RuntimeException("Failed to parse JSON from " + url, e);
+            throw new RuntimeException("JSON parse error: " + e.getMessage(), e);
         }
     }
 }
