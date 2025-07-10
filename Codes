@@ -60,7 +60,7 @@ public class DataService {
                 throw new RuntimeException("Token not found in auth response");
             }
 
-            System.out.println("✅ Token fetched: " + token);
+            System.out.println("✅ Token fetched: " + token.substring(0, 10) + "..."); // Log partial token for security
 
         } catch (Exception e) {
             throw new RuntimeException("Failed to fetch token: " + e.getMessage(), e);
@@ -68,17 +68,21 @@ public class DataService {
     }
 
     public List<MergedEntity> getMergedEntities() {
-        fetchAuthToken();
+        try {
+            fetchAuthToken();
 
-        JsonNode financeResults = fetchJson(financeChUrl).path("results");
-        System.out.println("✅ Finance results count: " + financeResults.size());
+            JsonNode financeResults = fetchJson(financeChUrl).path("results");
+            System.out.println("✅ Finance results count: " + financeResults.size());
 
-        return StreamSupport.stream(financeResults.spliterator(), false)
-                .map(resultNode -> resultNode.path("entity"))
-                .filter(entityNode -> entityNode.has("identifiers") && entityNode.path("identifiers").has("ptyId"))
-                .map(this::mergeForSinglePtyId)
-                .filter(merged -> merged != null)
-                .collect(Collectors.toList());
+            return StreamSupport.stream(financeResults.spliterator(), false)
+                    .map(resultNode -> resultNode.path("entity"))
+                    .filter(entityNode -> entityNode.has("identifiers") && entityNode.path("identifiers").has("ptyId"))
+                    .map(this::mergeForSinglePtyId)
+                    .filter(merged -> merged != null)
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to get merged entities: " + e.getMessage(), e);
+        }
     }
 
     private MergedEntity mergeForSinglePtyId(JsonNode financeEntity) {
@@ -88,7 +92,11 @@ public class DataService {
 
             System.out.println("🔍 Processing ptyId: " + ptyId);
 
-            BusinessAddress businessAddress = mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
+            BusinessAddress businessAddress = mapper.convertValue(
+                    financeEntity.path("businessAddress"), 
+                    BusinessAddress.class
+            );
+            
             Identifiers identifiers = mapper.convertValue(identifiersNode, Identifiers.class);
 
             String kycEndpoint = kycUrl + "?ptyId=" + ptyId;
@@ -101,23 +109,15 @@ public class DataService {
             }
 
             JsonNode kycData = results.get(0).path("kycData");
+            
+            // Extract kycSites with detailed debugging
+            List<KycSites> kycSites = extractKycSites(kycData.path("kycSites"));
+            System.out.println("✅ Found " + kycSites.size() + " kycSites for ptyId " + ptyId);
 
-            // kycSites
-            JsonNode kycSitesNode = kycData.path("kycSites");
-            List<KycSites> kycSites = kycSitesNode.isArray()
-                    ? mapper.convertValue(kycSitesNode, new TypeReference<>() {})
-                    : Collections.emptyList();
-            System.out.println("✅ kycSites count for ptyId " + ptyId + ": " + kycSites.size());
-
-            // kycSegment
             String kycSegment = kycData.path("kycSegment").asText(null);
 
-            // riskIndustry
-            JsonNode riskIndustryNode = kycData.path("riskIndustry");
-            List<RiskIndustry> riskIndustry = riskIndustryNode.isArray()
-                    ? mapper.convertValue(riskIndustryNode, new TypeReference<>() {})
-                    : Collections.emptyList();
-
+            List<RiskIndustry> riskIndustry = extractRiskIndustries(kycData.path("riskIndustry"));
+            
             return new MergedEntity(
                     List.of(identifiers),
                     businessAddress,
@@ -133,21 +133,68 @@ public class DataService {
         }
     }
 
-    private JsonNode fetchJson(String url) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(token);
-        headers.add("Accept", "*/*;version=gamma");
-
-        ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(headers), String.class);
-
-        if (!response.getStatusCode().is2xxSuccessful()) {
-            throw new RuntimeException("GET " + url + " failed: " + response.getStatusCode());
-        }
-
+    private List<KycSites> extractKycSites(JsonNode kycSitesNode) {
         try {
+            if (!kycSitesNode.isArray()) {
+                return Collections.emptyList();
+            }
+            
+            System.out.println("🔍 Raw kycSites JSON: " + kycSitesNode.toString());
+            
+            List<KycSites> sites = mapper.convertValue(
+                    kycSitesNode,
+                    new TypeReference<List<KycSites>>() {}
+            );
+            
+            // Additional debugging for each site
+            sites.forEach(site -> 
+                System.out.println("✔️ Processed site: " + site.getSiteEntity() + " in " + site.getSiteCountry())
+            );
+            
+            return sites;
+        } catch (Exception e) {
+            System.err.println("❌ Failed to parse kycSites");
+            e.printStackTrace();
+            return Collections.emptyList();
+        }
+    }
+
+    private List<RiskIndustry> extractRiskIndustries(JsonNode riskIndustryNode) {
+        try {
+            if (!riskIndustryNode.isArray()) {
+                return Collections.emptyList();
+            }
+            return mapper.convertValue(
+                    riskIndustryNode,
+                    new TypeReference<List<RiskIndustry>>() {}
+            );
+        } catch (Exception e) {
+            System.err.println("❌ Failed to parse riskIndustries");
+            e.printStackTrace();
+            return Collections.emptyList();
+        }
+    }
+
+    private JsonNode fetchJson(String url) {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setBearerAuth(token);
+            headers.add("Accept", "*/*;version=gamma");
+
+            ResponseEntity<String> response = restTemplate.exchange(
+                    url, 
+                    HttpMethod.GET, 
+                    new HttpEntity<>(headers), 
+                    String.class
+            );
+
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                throw new RuntimeException("GET " + url + " failed: " + response.getStatusCode());
+            }
+
             return mapper.readTree(response.getBody());
         } catch (Exception e) {
-            throw new RuntimeException("Failed to parse JSON from: " + url, e);
+            throw new RuntimeException("Failed to fetch JSON from: " + url, e);
         }
     }
 }
