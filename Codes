@@ -1,315 +1,111 @@
-package org.example.config;
-
-import io.netty.handler.ssl.SslContext;
-import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.http.client.reactive.ReactorClientHttpConnector;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.netty.http.client.HttpClient;
-
-import javax.net.ssl.SSLException;
-import java.net.InetSocketAddress;
-import java.time.Duration;
-
-@Configuration
-public class WebClientConfig {
-
-    @Value("${api.base-url}")
-    private String baseUrl;
-    
-    @Value("${api.actual-ip}")
-    private String actualIp;
-    
-    @Value("${connection.timeout}")
-    private long timeout;
-
-    @Bean
-    public WebClient webClient() throws SSLException {
-        SslContext sslContext = SslContextBuilder
-                .forClient()
-                .trustManager(InsecureTrustManagerFactory.INSTANCE)
-                .build();
-
-        HttpClient httpClient = HttpClient.create()
-                .secure(t -> t.sslContext(sslContext))
-                .baseUrl(baseUrl)
-                .resolver(spec -> spec.roundRobin(InetSocketAddress.createUnresolved(actualIp, 443)))
-                .responseTimeout(Duration.ofMillis(timeout))
-                .headers(headers -> headers.set("Accept", "*/*;version=gamma"));
-
-        return WebClient.builder()
-                .clientConnector(new ReactorClientHttpConnector(httpClient))
-                .baseUrl(baseUrl)
-                .build();
-    }
-}
-
-
-
-
-
 package org.example.service;
 
-import lombok.extern.slf4j.Slf4j;
-import org.example.model.*;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
+import org.example.model.PtyIdContainer;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.*;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
-
-import java.time.Duration;
-import java.util.List;
-
-@Slf4j
-@Service
-public class EntityMergeService {
-
-    private final WebClient webClient;
-    
-    @Value("${api.auth-path}")
-    private String authPath;
-    @Value("${api.kyc-path}")
-    private String kycPath;
-    @Value("${api.finance-path}")
-    private String financePath;
-    @Value("${api.client.credentials}")
-    private String clientCredentials;
-    @Value("${connection.max-retries}")
-    private int maxRetries;
-
-    public EntityMergeService(WebClient webClient) {
-        this.webClient = webClient;
-    }
-
-    public Mono<List<MergedEntity>> mergeAllEntities() {
-        return withRetry(this::getAccessToken)
-                .flatMap(this::fetchAndMergeData)
-                .timeout(Duration.ofSeconds(30))
-                .doOnError(e -> log.error("Failed to merge entities", e));
-    }
-
-    private Mono<List<MergedEntity>> fetchAndMergeData(String token) {
-        return withRetry(() -> getKycData(token))
-                .flatMapMany(kycRoot -> Flux.fromIterable(kycRoot.getResults()))
-                .flatMap(kycResult -> processKycRecord(kycResult, token))
-                .collectList();
-    }
-
-    private Mono<MergedEntity> processKycRecord(File2Result kycResult, String token) {
-        return Mono.justOrEmpty(extractKycId(kycResult))
-                .flatMap(kycId -> withRetry(() -> getFinanceData(kycId, token))
-                .map(financeRoot -> createMergedEntity(
-                        financeRoot.getResults().isEmpty() ? null : financeRoot.getResults().get(0).getEntity(),
-                        kycResult
-                ))
-                .onErrorResume(e -> {
-                    log.warn("Skipping record due to error", e);
-                    return Mono.empty();
-                });
-    }
-
-    private <T> Mono<T> withRetry(Mono<T> supplier) {
-        return supplier.retryWhen(reactor.util.retry.Retry.fixedDelay(maxRetries, Duration.ofSeconds(1)));
-    }
-
-    private Mono<String> getAccessToken() {
-        return webClient.post()
-                .uri(authPath)
-                .header("Authorization", "Basic " + clientCredentials)
-                .retrieve()
-                .bodyToMono(String.class)
-                .map(this::extractToken)
-                .doOnSuccess(t -> log.info("Obtained access token"))
-                .doOnError(e -> log.error("Failed to get token", e));
-    }
-
-    private String extractToken(String response) {
-        if (response.contains("access_token")) {
-            return response.split("\"access_token\":\"")[1].split("\"")[0];
-        }
-        throw new RuntimeException("Invalid token response");
-    }
-
-    private Mono<File2Root> getKycData(String token) {
-        return webClient.get()
-                .uri(kycPath)
-                .header("Authorization", "Bearer " + token)
-                .retrieve()
-                .bodyToMono(File2Root.class)
-                .doOnError(e -> log.error("Failed to get KYC data", e));
-    }
-
-    private Mono<File1Root> getFinanceData(String kycId, String token) {
-        return webClient.get()
-                .uri(uriBuilder -> uriBuilder
-                        .path(financePath)
-                        .queryParam("kycId", kycId)
-                        .build())
-                .header("Authorization", "Bearer " + token)
-                .retrieve()
-                .bodyToMono(File1Root.class)
-                .doOnError(e -> log.error("Failed to get finance data for {}", kycId, e));
-    }
-
-    private Integer extractKycId(File2Result kycResult) {
-        return kycResult.getIdentifiers().stream()
-                .map(Identifiers::getKycId)
-                .findFirst()
-                .orElse(null);
-    }
-
-    private MergedEntity createMergedEntity(Entity financeEntity, File2Result kycResult) {
-        MergedEntity merged = new MergedEntity();
-        merged.setIdentifiers(kycResult.getIdentifiers());
-        
-        if (financeEntity != null) {
-            merged.setBusinessAddress(financeEntity.getBusinessAddress());
-        }
-        
-        if (kycResult.getKycData() != null) {
-            merged.setKycSites(kycResult.getKycData().getKycSites());
-            merged.setKycSegment(kycResult.getKycData().getKycSegment());
-            merged.setRiskIndustry(kycResult.getKycData().getRiskIndustry());
-        }
-        
-        return merged;
-    }
-}
-
-
-
-
-
-
-
-
-
-package org.example.controller;
-
-import lombok.extern.slf4j.Slf4j;
-import org.example.model.MergedEntity;
-import org.example.service.EntityMergeService;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-import reactor.core.publisher.Mono;
-
-import java.util.List;
-
-@Slf4j
-@RestController
-@RequestMapping("/api/entities")
-public class EntityController {
-
-    private final EntityMergeService entityMergeService;
-
-    public EntityController(EntityMergeService entityMergeService) {
-        this.entityMergeService = entityMergeService;
-    }
-
-    @GetMapping("/merged")
-    public Mono<ResponseEntity<List<MergedEntity>>> getAllMergedEntities() {
-        return entityMergeService.mergeAllEntities()
-                .map(ResponseEntity::ok)
-                .onErrorResume(e -> {
-                    log.error("Failed to process request", e);
-                    return Mono.just(ResponseEntity.internalServerError().build());
-                });
-    }
-}
-
-
-
-
-
-
-
-package org.example;
-
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-
-@SpringBootApplication
-public class EntityMergeApplication {
-    public static void main(String[] args) {
-        // Set these before starting if not using application.properties
-        System.setProperty("sun.net.spi.nameservice.provider.1", "dns,sun");
-        System.setProperty("sun.net.spi.nameservice.nameservers", "8.8.8.8");
-        System.setProperty("sun.net.spi.nameservice.timeout", "5000");
-        
-        SpringApplication.run(EntityMergeApplication.class, args);
-    }
-}
-
-
-
-
-
-
-package org.example.config;
-
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.web.reactive.error.ErrorWebExceptionHandler;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.core.annotation.Order;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.http.codec.HttpMessageReader;
-import org.springframework.http.codec.HttpMessageWriter;
-import org.springframework.web.reactive.function.BodyInserters;
-import org.springframework.web.reactive.function.server.RequestPredicates;
-import org.springframework.web.reactive.function.server.RouterFunctions;
-import org.springframework.web.reactive.function.server.ServerRequest;
-import org.springframework.web.reactive.function.server.ServerResponse;
-import org.springframework.web.reactive.result.view.ViewResolver;
-import org.springframework.web.server.ServerWebExchange;
-import reactor.core.publisher.Mono;
+import org.springframework.web.client.RestTemplate;
 
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
-@Slf4j
-@Configuration
-@Order(-2)
-public class GlobalErrorHandler implements ErrorWebExceptionHandler {
+@Service
+public class DataService {
 
-    private List<HttpMessageReader<?>> messageReaders = Collections.emptyList();
-    private List<HttpMessageWriter<?>> messageWriters = Collections.emptyList();
-    private List<ViewResolver> viewResolvers = Collections.emptyList();
+    private final RestTemplate restTemplate;
+    private final ObjectMapper mapper;
 
-    @Override
-    public Mono<Void> handle(ServerWebExchange exchange, Throwable ex) {
-        log.error("Global error handler: {}", ex.getMessage(), ex);
-        
-        Map<String, String> errorResponse = Map.of(
-            "error", "Internal Server Error",
-            "message", ex.getMessage()
-        );
-        
-        return ServerResponse.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(BodyInserters.fromValue(errorResponse))
-                .flatMap(response -> response.writeTo(exchange, new ResponseContext()));
+    @Value("${api.financech.url}")
+    private String financeChUrl;
+
+    @Value("${api.kyc.url}")
+    private String kycUrl;
+
+    @Value("${auth.token.url}")
+    private String authTokenUrl;
+
+    @Value("${auth.basic.auth}")
+    private String basicAuth;
+
+    private String token;
+
+    public DataService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
+        this.mapper = new ObjectMapper();
     }
 
-    private class ResponseContext implements ServerResponse.Context {
-        @Override
-        public List<HttpMessageWriter<?>> messageWriters() {
-            return GlobalErrorHandler.this.messageWriters;
-        }
+    private void fetchAuthToken() {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+            headers.set("Authorization", basicAuth);
+            headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
 
-        @Override
-        public List<ViewResolver> viewResolvers() {
-            return GlobalErrorHandler.this.viewResolvers;
+            HttpEntity<String> request = new HttpEntity<>("", headers);
+
+            ResponseEntity<String> response = restTemplate.postForEntity(authTokenUrl, request, String.class);
+
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                throw new RuntimeException("Auth token API returned error: " + response.getStatusCode());
+            }
+
+            JsonNode json = mapper.readTree(response.getBody());
+            this.token = json.path("access_token").asText();
+
+            if (token == null || token.isBlank()) {
+                throw new RuntimeException("Token not found in auth response");
+            }
+
+            System.out.println("Auth token: " + token);
+
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to fetch token: " + e.getMessage(), e);
+        }
+    }
+
+    public PtyIdContainer getAllPtyIdsFromFinance() {
+        try {
+            fetchAuthToken();
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setBearerAuth(this.token);
+            headers.add("Accept", "*/*;version=gamma");
+
+            HttpEntity<String> request = new HttpEntity<>(headers);
+
+            ResponseEntity<String> financeResponse = restTemplate.exchange(
+                    financeChUrl,
+                    HttpMethod.GET,
+                    request,
+                    String.class
+            );
+
+            if (!financeResponse.getStatusCode().is2xxSuccessful()) {
+                throw new RuntimeException("FinanceCH API returned error: " + financeResponse.getStatusCode());
+            }
+
+            JsonNode financeResults = mapper.readTree(financeResponse.getBody()).path("results");
+
+            System.out.println("Total results: " + financeResults.size());
+
+            List<String> ptyIds = StreamSupport.stream(financeResults.spliterator(), false)
+                    .map(result -> result.path("entity").path("identifiers").path("ptyId"))
+                    .filter(JsonNode::isValueNode)
+                    .map(JsonNode::asText)
+                    .collect(Collectors.toList());
+
+            System.out.println("Total ptyIds: " + ptyIds.size());
+
+            return new PtyIdContainer(ptyIds);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            throw new RuntimeException("Failed to fetch ptyIds from Finance API", e);
         }
     }
 }
-
-
-
