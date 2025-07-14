@@ -1,159 +1,39 @@
-package org.example.service;
+package org.example.controller;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.example.model.*;
+import org.example.model.MergedEntity;
+import org.example.service.DataService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
-import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
 
-import java.util.Collections;
 import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 
-@Service
-public class DataService {
+@RestController
+@RequestMapping("/finance")
+public class DataController {
 
-    private static final Logger logger = LoggerFactory.getLogger(DataService.class);
+    private static final Logger logger = LoggerFactory.getLogger(DataController.class);
 
-    private final RestTemplate restTemplate;
-    private final ObjectMapper mapper;
+    private final DataService dataService;
 
-    @Value("${api.financech.url}")
-    private String financeChUrl;
-
-    @Value("${api.kyc.url}")
-    private String kycUrl;
-
-    @Value("${auth.token.url}")
-    private String authTokenUrl;
-
-    @Value("${auth.basic.auth}")
-    private String basicAuth;
-
-    private String token;
-
-    public DataService(RestTemplate restTemplate) {
-        this.restTemplate = restTemplate;
-        this.mapper = new ObjectMapper();
+    public DataController(DataService dataService) {
+        this.dataService = dataService;
     }
 
-    private void fetchAuthToken() {
+    /**
+     * GET /finance/merged
+     * Returns a list of merged entities.
+     */
+    @GetMapping("/merged")
+    public ResponseEntity<List<MergedEntity>> getMerged() {
         try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-            headers.set("Authorization", basicAuth);
-            headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
-
-            HttpEntity<String> request = new HttpEntity<>("", headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(authTokenUrl, request, String.class);
-
-            if (!response.getStatusCode().is2xxSuccessful()) {
-                logger.error("{}", response.getStatusCode());
-                throw new RuntimeException("Internal Server Error");
-            }
-
-            JsonNode json = mapper.readTree(response.getBody());
-            this.token = json.path("access_token").asText();
-
-            if (token == null || token.isBlank()) {
-                logger.error("Token missing");
-                throw new RuntimeException("Internal Server Error");
-            }
-
+            List<MergedEntity> merged = dataService.getMergedEntities();
+            return ResponseEntity.ok(merged);
         } catch (Exception e) {
-            logger.error("Exception: ", e);
-            throw new RuntimeException("Internal Server Error");
-        }
-    }
-
-    public List<MergedEntity> getMergedEntities() {
-        try {
-            fetchAuthToken();
-
-            JsonNode financeResults = fetchJson(financeChUrl).path("results");
-            logger.info("Finance results: {}", financeResults.size());
-
-            return StreamSupport.stream(financeResults.spliterator(), false)
-                    .map(resultNode -> resultNode.path("entity"))
-                    .filter(entityNode -> entityNode.has("identifiers") && entityNode.path("identifiers").has("ptyId"))
-                    .map(this::mergeForSinglePtyId)
-                    .filter(merged -> merged != null)
-                    .collect(Collectors.toList());
-
-        } catch (Exception e) {
-            logger.error("Exception: ", e);
-            throw new RuntimeException("Internal Server Error");
-        }
-    }
-
-    private MergedEntity mergeForSinglePtyId(JsonNode financeEntity) {
-        try {
-            JsonNode identifiersNode = financeEntity.path("identifiers");
-            String ptyId = identifiersNode.path("ptyId").asText();
-
-            BusinessAddress businessAddress = mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
-            Identifiers identifiers = mapper.convertValue(identifiersNode, Identifiers.class);
-
-            String kycEndpoint = kycUrl + "?ptyId=" + ptyId;
-            JsonNode kycRoot = fetchJson(kycEndpoint);
-            JsonNode results = kycRoot.path("results");
-
-            if (!results.isArray() || results.size() == 0) {
-                logger.warn("KYC data missing for ptyId: {}", ptyId);
-                return null;
-            }
-
-            JsonNode kycData = results.get(0).path("kycData");
-
-            List<KycSites> kycSites = kycData.path("kycSites").isArray()
-                    ? mapper.convertValue(kycData.path("kycSites"), new TypeReference<>() {})
-                    : Collections.emptyList();
-
-            String kycSegment = kycData.path("kycSegment").asText(null);
-
-            List<RiskIndustry> riskIndustry = kycData.path("riskIndustry").isArray()
-                    ? mapper.convertValue(kycData.path("riskIndustry"), new TypeReference<>() {})
-                    : Collections.emptyList();
-
-            return new MergedEntity(
-                    List.of(identifiers),
-                    businessAddress,
-                    kycSites,
-                    kycSegment,
-                    riskIndustry
-            );
-
-        } catch (Exception e) {
-            logger.error("Exception while merging ptyId {}: ", financeEntity.path("identifiers").path("ptyId").asText(), e);
-            return null;
-        }
-    }
-
-    private JsonNode fetchJson(String url) {
-        try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setBearerAuth(token);
-            headers.add("Accept", "*/*;version=gamma");
-
-            HttpEntity<String> request = new HttpEntity<>(headers);
-            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, request, String.class);
-
-            if (!response.getStatusCode().is2xxSuccessful()) {
-                logger.error("API call failed: {} - {}", url, response.getStatusCode());
-                throw new RuntimeException("Internal Server Error");
-            }
-
-            return mapper.readTree(response.getBody());
-
-        } catch (Exception e) {
-            logger.error("Exception while fetching URL: {}: ", url, e);
-            throw new RuntimeException("Internal Server Error");
+            logger.error("Exception in /finance/merged endpoint", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 }
