@@ -1,9 +1,10 @@
-package org.example.service;
+package com.bnp.service;
 
+import com.bnp.model.*;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.example.model.*;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -11,6 +12,9 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -43,7 +47,6 @@ public class DataService {
         this.mapper = new ObjectMapper();
     }
 
-    // ────────────── 1. Fetch Auth Token ──────────────
     private void fetchAuthToken() {
         try {
             HttpHeaders headers = new HttpHeaders();
@@ -54,77 +57,67 @@ public class DataService {
             HttpEntity<String> request = new HttpEntity<>("", headers);
             ResponseEntity<String> response = restTemplate.postForEntity(authTokenUrl, request, String.class);
 
-            if (response.getStatusCode().is2xxSuccessful()) {
-                JsonNode json = mapper.readTree(response.getBody());
-                token = json.path("access_token").asText(null);
-
-                if (token == null || token.isBlank()) {
-                    logger.error("Access token missing in response");
-                }
-            } else {
-                logger.error("Auth token API failed with status: {}", response.getStatusCode());
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                logger.error("Auth token API failed: {}", response.getStatusCode());
+                token = null;
+                return;
             }
+
+            JsonNode json = mapper.readTree(response.getBody());
+            token = json.path("access_token").asText(null);
+
+            if (token == null || token.isBlank()) {
+                logger.error("Access token missing in auth response");
+            }
+
         } catch (Exception e) {
             logger.error("Error while fetching auth token", e);
+            token = null;
         }
     }
 
-    // ────────────── 2. Main Entry Point ──────────────
     public List<MergedEntity> getMergedEntities() {
         fetchAuthToken();
         JsonNode financeResults = fetchJson(financeChUrl).path("results");
         logger.info("Finance results count: {}", financeResults.size());
 
         return StreamSupport.stream(financeResults.spliterator(), false)
-                .map(r -> r.path("entity"))
-                .filter(e -> e.has("identifiers") && e.path("identifiers").has("ptyId"))
+                .map(result -> result.path("entity"))
+                .filter(entity -> entity.has("identifiers") && entity.path("identifiers").has("ptyId"))
                 .map(this::mergeForSinglePtyId)
                 .collect(Collectors.toList());
     }
 
-    // ────────────── 3. Merge One Entry ──────────────
     private MergedEntity mergeForSinglePtyId(JsonNode financeEntity) {
-
-        // Log and extract identifiers node
-        JsonNode identifiersNode = financeEntity.path("identifiers");
-        logger.info("Identifiers JSON:\n{}", identifiersNode.toPrettyString());
-
-        Identifiers identifiers = mapper.convertValue(identifiersNode, Identifiers.class);
-        logger.info("Mapped kycId: {}", identifiers.getKycId());
-
+        Identifiers identifiers = mapper.convertValue(financeEntity.path("identifiers"), Identifiers.class);
         BusinessAddress businessAddress = mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
-
         RegistrationAddress registrationAddress = financeEntity.has("registrationAddress")
                 ? mapper.convertValue(financeEntity.path("registrationAddress"), RegistrationAddress.class)
                 : null;
 
-        String ptyId = identifiers.getPtyId();
+        String ptyId = identifiers.getPtyId() != null ? identifiers.getPtyId().toString() : null;
 
         List<KycSites> kycSites = null;
         String kycSegment = null;
         List<RiskIndustry> riskIndustry = null;
 
-        if (ptyId != null && token != null && !token.isBlank()) {
+        if (ptyId != null && token != null) {
             JsonNode kycRoot = fetchJson(kycUrl + "?ptyId=" + ptyId);
             JsonNode kycData = kycRoot.path("results").isArray() && kycRoot.path("results").size() > 0
                     ? kycRoot.path("results").get(0).path("kycData")
-                    : null;
+                    : mapper.createObjectNode();
 
-            if (kycData != null && !kycData.isMissingNode()) {
-                if (kycData.has("kycSites") && kycData.path("kycSites").isArray()) {
+            if (!kycData.isMissingNode()) {
+                if (kycData.path("kycSites").isArray()) {
                     kycSites = mapper.convertValue(kycData.path("kycSites"), new TypeReference<>() {});
                 }
-                if (kycData.has("kycSegment")) {
-                    kycSegment = kycData.path("kycSegment").asText(null);
-                }
-                if (kycData.has("riskIndustry") && kycData.path("riskIndustry").isArray()) {
+                kycSegment = kycData.has("kycSegment") ? kycData.path("kycSegment").asText(null) : null;
+                if (kycData.path("riskIndustry").isArray()) {
                     riskIndustry = mapper.convertValue(kycData.path("riskIndustry"), new TypeReference<>() {});
                 }
             } else {
-                logger.info("No KYC data found for ptyId {}", ptyId);
+                logger.info("No KYC data for ptyId: {}", ptyId);
             }
-        } else {
-            logger.warn("Skipping KYC fetch for ptyId {} (token or id missing)", ptyId);
         }
 
         return new MergedEntity(
@@ -137,29 +130,77 @@ public class DataService {
         );
     }
 
-    // ────────────── 4. Fetch JSON from URL ──────────────
     private JsonNode fetchJson(String url) {
         try {
             HttpHeaders headers = new HttpHeaders();
+            headers.add("Accept", "*/*;version=gamma");
             if (token != null && !token.isBlank()) {
                 headers.setBearerAuth(token);
             }
-            headers.add("Accept", "*/*;version=gamma");
 
-            ResponseEntity<String> response = restTemplate.exchange(
-                    url, HttpMethod.GET, new HttpEntity<>(headers), String.class
-            );
+            HttpEntity<String> request = new HttpEntity<>(headers);
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, request, String.class);
 
             if (!response.getStatusCode().is2xxSuccessful()) {
-                logger.error("GET {} failed: {}", url, response.getStatusCode());
+                logger.error("GET {} failed with status {}", url, response.getStatusCode());
                 return mapper.createObjectNode();
             }
 
             return mapper.readTree(response.getBody());
-
         } catch (Exception e) {
-            logger.error("Error fetching JSON from {}", url, e);
+            logger.error("Exception while calling {}", url, e);
             return mapper.createObjectNode();
         }
+    }
+
+    public void exportMergedEntitiesToFile(String filePath) {
+        List<MergedEntity> entities = getMergedEntities();
+
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(filePath))) {
+            writer.write("CRDSCODE;Registration Address;Country;Site BNPP;Site Country;Site Status;KYC Segment;RIC\n");
+
+            for (MergedEntity entity : entities) {
+                Identifiers id = entity.getIdentifiers().get(0);
+                RegistrationAddress reg = entity.getRegistrationAddress();
+
+                String crdsCode = safe(id.getCrdsCode());
+
+                String regAddress = reg != null
+                        ? safe(reg.getLine1()) + safe(reg.getLine2()) + safe(reg.getCity())
+                            + safe(reg.getState()) + safe(reg.getZipCode())
+                        : "";
+
+                String regCountry = reg != null ? safe(reg.getCountry()) : "";
+
+                KycSites site = entity.getKycSites() != null && !entity.getKycSites().isEmpty()
+                        ? entity.getKycSites().get(0)
+                        : null;
+
+                String siteName = site != null ? safe(site.getSiteName()) : "";
+                String siteCountry = site != null ? safe(site.getSiteCountry()) : "";
+                String siteStatus = site != null ? safe(site.getSiteStatus()) : "";
+                String kycSegment = safe(entity.getKycSegment());
+
+                String ric = "";
+                if (entity.getRiskIndustry() != null) {
+                    ric = entity.getRiskIndustry().stream()
+                            .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
+                            .collect(Collectors.joining(","));
+                }
+
+                String row = String.join(";", crdsCode, regAddress, regCountry,
+                        siteName, siteCountry, siteStatus, kycSegment, ric);
+                writer.write(row + "\n");
+            }
+
+            logger.info("File successfully written to {}", filePath);
+
+        } catch (IOException e) {
+            logger.error("Error writing to file", e);
+        }
+    }
+
+    private String safe(String value) {
+        return value == null ? "" : value.trim().replaceAll(";", " ");
     }
 }
