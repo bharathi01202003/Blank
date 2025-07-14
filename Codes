@@ -3,7 +3,6 @@ package org.example.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.example.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,37 +43,37 @@ public class DataService {
         this.mapper = new ObjectMapper();
     }
 
-    /* ───────────────────────────── 1. TOKEN ───────────────────────────── */
+    // ────────────── 1. Fetch Auth Token ──────────────
     private void fetchAuthToken() {
         try {
-            HttpHeaders h = new HttpHeaders();
-            h.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-            h.set("Authorization", basicAuth);
-            h.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+            headers.set("Authorization", basicAuth);
+            headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
 
-            ResponseEntity<String> res =
-                    restTemplate.postForEntity(authTokenUrl, new HttpEntity<>("", h), String.class);
+            HttpEntity<String> request = new HttpEntity<>("", headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(authTokenUrl, request, String.class);
 
-            if (!res.getStatusCode().is2xxSuccessful()) {
-                logger.error("Auth API status: {}", res.getStatusCode());
-                token = null;
-                return;
+            if (response.getStatusCode().is2xxSuccessful()) {
+                JsonNode json = mapper.readTree(response.getBody());
+                token = json.path("access_token").asText(null);
+
+                if (token == null || token.isBlank()) {
+                    logger.error("Access token missing in response");
+                }
+            } else {
+                logger.error("Auth token API failed with status: {}", response.getStatusCode());
             }
-            token = mapper.readTree(res.getBody()).path("access_token").asText(null);
-            if (token == null || token.isBlank()) {
-                logger.error("access_token missing in auth response");
-            }
-        } catch (Exception ex) {
-            logger.error("Exception while fetching auth token", ex);
-            token = null;
+        } catch (Exception e) {
+            logger.error("Error while fetching auth token", e);
         }
     }
 
-    /* ─────────────────────────── 2. MAIN ENTRY ────────────────────────── */
+    // ────────────── 2. Main Entry Point ──────────────
     public List<MergedEntity> getMergedEntities() {
         fetchAuthToken();
         JsonNode financeResults = fetchJson(financeChUrl).path("results");
-        logger.info("Finance results count: {}", financeResults.isMissingNode() ? 0 : financeResults.size());
+        logger.info("Finance results count: {}", financeResults.size());
 
         return StreamSupport.stream(financeResults.spliterator(), false)
                 .map(r -> r.path("entity"))
@@ -83,43 +82,49 @@ public class DataService {
                 .collect(Collectors.toList());
     }
 
-    /* ────────────────────────── 3. MERGE ONE ──────────────────────────── */
+    // ────────────── 3. Merge One Entry ──────────────
     private MergedEntity mergeForSinglePtyId(JsonNode financeEntity) {
 
-        Identifiers identifiers = mapper.convertValue(financeEntity.path("identifiers"), Identifiers.class);
-        BusinessAddress businessAddress =
-                mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
+        // Log and extract identifiers node
+        JsonNode identifiersNode = financeEntity.path("identifiers");
+        logger.info("Identifiers JSON:\n{}", identifiersNode.toPrettyString());
+
+        Identifiers identifiers = mapper.convertValue(identifiersNode, Identifiers.class);
+        logger.info("Mapped kycId: {}", identifiers.getKycId());
+
+        BusinessAddress businessAddress = mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
 
         RegistrationAddress registrationAddress = financeEntity.has("registrationAddress")
                 ? mapper.convertValue(financeEntity.path("registrationAddress"), RegistrationAddress.class)
                 : null;
 
-        String ptyId = identifiers.getPtyId() == null ? null : identifiers.getPtyId().toString();
+        String ptyId = identifiers.getPtyId();
 
-        /* Default values if KYC call fails or returns nothing */
-        List<KycSites>     kycSites     = null;
-        String             kycSegment   = null;
+        List<KycSites> kycSites = null;
+        String kycSegment = null;
         List<RiskIndustry> riskIndustry = null;
 
         if (ptyId != null && token != null && !token.isBlank()) {
             JsonNode kycRoot = fetchJson(kycUrl + "?ptyId=" + ptyId);
             JsonNode kycData = kycRoot.path("results").isArray() && kycRoot.path("results").size() > 0
                     ? kycRoot.path("results").get(0).path("kycData")
-                    : mapper.createObjectNode();
+                    : null;
 
-            if (!kycData.isMissingNode()) {
-                if (kycData.path("kycSites").isArray()) {
+            if (kycData != null && !kycData.isMissingNode()) {
+                if (kycData.has("kycSites") && kycData.path("kycSites").isArray()) {
                     kycSites = mapper.convertValue(kycData.path("kycSites"), new TypeReference<>() {});
                 }
-                kycSegment = kycData.has("kycSegment") ? kycData.path("kycSegment").asText(null) : null;
-                if (kycData.path("riskIndustry").isArray()) {
+                if (kycData.has("kycSegment")) {
+                    kycSegment = kycData.path("kycSegment").asText(null);
+                }
+                if (kycData.has("riskIndustry") && kycData.path("riskIndustry").isArray()) {
                     riskIndustry = mapper.convertValue(kycData.path("riskIndustry"), new TypeReference<>() {});
                 }
             } else {
                 logger.info("No KYC data found for ptyId {}", ptyId);
             }
         } else {
-            logger.warn("Skipping KYC fetch for ptyId {} (missing token or id)", ptyId);
+            logger.warn("Skipping KYC fetch for ptyId {} (token or id missing)", ptyId);
         }
 
         return new MergedEntity(
@@ -132,25 +137,28 @@ public class DataService {
         );
     }
 
-    /* ─────────────────────────── 4. GET JSON ──────────────────────────── */
+    // ────────────── 4. Fetch JSON from URL ──────────────
     private JsonNode fetchJson(String url) {
         try {
-            HttpHeaders h = new HttpHeaders();
+            HttpHeaders headers = new HttpHeaders();
             if (token != null && !token.isBlank()) {
-                h.setBearerAuth(token);
+                headers.setBearerAuth(token);
             }
-            h.add("Accept", "*/*;version=gamma");
+            headers.add("Accept", "*/*;version=gamma");
 
-            ResponseEntity<String> res = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(h), String.class);
+            ResponseEntity<String> response = restTemplate.exchange(
+                    url, HttpMethod.GET, new HttpEntity<>(headers), String.class
+            );
 
-            if (!res.getStatusCode().is2xxSuccessful()) {
-                logger.error("GET {} returned status {}", url, res.getStatusCode());
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                logger.error("GET {} failed: {}", url, response.getStatusCode());
                 return mapper.createObjectNode();
             }
-            return mapper.readTree(res.getBody());
 
-        } catch (Exception ex) {
-            logger.error("Exception while fetching URL {}", url, ex);
+            return mapper.readTree(response.getBody());
+
+        } catch (Exception e) {
+            logger.error("Error fetching JSON from {}", url, e);
             return mapper.createObjectNode();
         }
     }
