@@ -1,39 +1,157 @@
-package org.example.controller;
+package org.example.service;
 
-import org.example.model.MergedEntity;
-import org.example.service.DataService;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.example.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.*;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
-@RestController
-@RequestMapping("/finance")
-public class DataController {
+@Service
+public class DataService {
 
-    private static final Logger logger = LoggerFactory.getLogger(DataController.class);
+    private static final Logger logger = LoggerFactory.getLogger(DataService.class);
 
-    private final DataService dataService;
+    private final RestTemplate restTemplate;
+    private final ObjectMapper mapper;
 
-    public DataController(DataService dataService) {
-        this.dataService = dataService;
+    @Value("${api.financech.url}")
+    private String financeChUrl;
+
+    @Value("${api.kyc.url}")
+    private String kycUrl;
+
+    @Value("${auth.token.url}")
+    private String authTokenUrl;
+
+    @Value("${auth.basic.auth}")
+    private String basicAuth;
+
+    private String token;
+
+    public DataService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
+        this.mapper = new ObjectMapper();
     }
 
-    /**
-     * GET /finance/merged
-     * Returns a list of merged entities.
-     */
-    @GetMapping("/merged")
-    public ResponseEntity<List<MergedEntity>> getMerged() {
+    /* ───────────────────────────── 1. TOKEN ───────────────────────────── */
+    private void fetchAuthToken() {
         try {
-            List<MergedEntity> merged = dataService.getMergedEntities();
-            return ResponseEntity.ok(merged);
-        } catch (Exception e) {
-            logger.error("Exception in /finance/merged endpoint", e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+            HttpHeaders h = new HttpHeaders();
+            h.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+            h.set("Authorization", basicAuth);
+            h.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
+
+            ResponseEntity<String> res =
+                    restTemplate.postForEntity(authTokenUrl, new HttpEntity<>("", h), String.class);
+
+            if (!res.getStatusCode().is2xxSuccessful()) {
+                logger.error("Auth API status: {}", res.getStatusCode());
+                token = null;
+                return;
+            }
+            token = mapper.readTree(res.getBody()).path("access_token").asText(null);
+            if (token == null || token.isBlank()) {
+                logger.error("access_token missing in auth response");
+            }
+        } catch (Exception ex) {
+            logger.error("Exception while fetching auth token", ex);
+            token = null;
+        }
+    }
+
+    /* ─────────────────────────── 2. MAIN ENTRY ────────────────────────── */
+    public List<MergedEntity> getMergedEntities() {
+        fetchAuthToken();
+        JsonNode financeResults = fetchJson(financeChUrl).path("results");
+        logger.info("Finance results count: {}", financeResults.isMissingNode() ? 0 : financeResults.size());
+
+        return StreamSupport.stream(financeResults.spliterator(), false)
+                .map(r -> r.path("entity"))
+                .filter(e -> e.has("identifiers") && e.path("identifiers").has("ptyId"))
+                .map(this::mergeForSinglePtyId)
+                .collect(Collectors.toList());
+    }
+
+    /* ────────────────────────── 3. MERGE ONE ──────────────────────────── */
+    private MergedEntity mergeForSinglePtyId(JsonNode financeEntity) {
+
+        Identifiers identifiers = mapper.convertValue(financeEntity.path("identifiers"), Identifiers.class);
+        BusinessAddress businessAddress =
+                mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
+
+        RegistrationAddress registrationAddress = financeEntity.has("registrationAddress")
+                ? mapper.convertValue(financeEntity.path("registrationAddress"), RegistrationAddress.class)
+                : null;
+
+        String ptyId = identifiers.getPtyId() == null ? null : identifiers.getPtyId().toString();
+
+        /* Default values if KYC call fails or returns nothing */
+        List<KycSites>     kycSites     = null;
+        String             kycSegment   = null;
+        List<RiskIndustry> riskIndustry = null;
+
+        if (ptyId != null && token != null && !token.isBlank()) {
+            JsonNode kycRoot = fetchJson(kycUrl + "?ptyId=" + ptyId);
+            JsonNode kycData = kycRoot.path("results").isArray() && kycRoot.path("results").size() > 0
+                    ? kycRoot.path("results").get(0).path("kycData")
+                    : mapper.createObjectNode();
+
+            if (!kycData.isMissingNode()) {
+                if (kycData.path("kycSites").isArray()) {
+                    kycSites = mapper.convertValue(kycData.path("kycSites"), new TypeReference<>() {});
+                }
+                kycSegment = kycData.has("kycSegment") ? kycData.path("kycSegment").asText(null) : null;
+                if (kycData.path("riskIndustry").isArray()) {
+                    riskIndustry = mapper.convertValue(kycData.path("riskIndustry"), new TypeReference<>() {});
+                }
+            } else {
+                logger.info("No KYC data found for ptyId {}", ptyId);
+            }
+        } else {
+            logger.warn("Skipping KYC fetch for ptyId {} (missing token or id)", ptyId);
+        }
+
+        return new MergedEntity(
+                List.of(identifiers),
+                businessAddress,
+                registrationAddress,
+                kycSites,
+                kycSegment,
+                riskIndustry
+        );
+    }
+
+    /* ─────────────────────────── 4. GET JSON ──────────────────────────── */
+    private JsonNode fetchJson(String url) {
+        try {
+            HttpHeaders h = new HttpHeaders();
+            if (token != null && !token.isBlank()) {
+                h.setBearerAuth(token);
+            }
+            h.add("Accept", "*/*;version=gamma");
+
+            ResponseEntity<String> res = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(h), String.class);
+
+            if (!res.getStatusCode().is2xxSuccessful()) {
+                logger.error("GET {} returned status {}", url, res.getStatusCode());
+                return mapper.createObjectNode();
+            }
+            return mapper.readTree(res.getBody());
+
+        } catch (Exception ex) {
+            logger.error("Exception while fetching URL {}", url, ex);
+            return mapper.createObjectNode();
         }
     }
 }
