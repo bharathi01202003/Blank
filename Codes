@@ -13,16 +13,19 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.io.BufferedWriter;
+import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
 @Service
 public class DataService {
 
+    /* ────────────────────────── FIELDS & DI  ────────────────────────── */
     private static final Logger logger = LoggerFactory.getLogger(DataService.class);
 
     private final RestTemplate restTemplate;
@@ -47,61 +50,64 @@ public class DataService {
         this.mapper = new ObjectMapper();
     }
 
+    /* ─────────────────────────── TOKEN FETCH ────────────────────────── */
     private void fetchAuthToken() {
         try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-            headers.set("Authorization", basicAuth);
-            headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
+            HttpHeaders h = new HttpHeaders();
+            h.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+            h.set("Authorization", basicAuth);
+            h.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
 
-            HttpEntity<String> request = new HttpEntity<>("", headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(authTokenUrl, request, String.class);
+            ResponseEntity<String> res =
+                    restTemplate.postForEntity(authTokenUrl, new HttpEntity<>("", h), String.class);
 
-            if (!response.getStatusCode().is2xxSuccessful()) {
-                logger.error("Auth token API failed: {}", response.getStatusCode());
+            if (!res.getStatusCode().is2xxSuccessful()) {
+                logger.error("Auth API status: {}", res.getStatusCode());
                 token = null;
                 return;
             }
 
-            JsonNode json = mapper.readTree(response.getBody());
-            token = json.path("access_token").asText(null);
-
+            token = mapper.readTree(res.getBody()).path("access_token").asText(null);
             if (token == null || token.isBlank()) {
-                logger.error("Access token missing in auth response");
+                logger.error("access_token missing in auth response");
             }
-
-        } catch (Exception e) {
-            logger.error("Error while fetching auth token", e);
+        } catch (Exception ex) {
+            logger.error("Exception while fetching auth token", ex);
             token = null;
         }
     }
 
+    /* ────────────────────────── PUBLIC MERGE ────────────────────────── */
     public List<MergedEntity> getMergedEntities() {
         fetchAuthToken();
         JsonNode financeResults = fetchJson(financeChUrl).path("results");
         logger.info("Finance results count: {}", financeResults.size());
 
         return StreamSupport.stream(financeResults.spliterator(), false)
-                .map(result -> result.path("entity"))
-                .filter(entity -> entity.has("identifiers") && entity.path("identifiers").has("ptyId"))
+                .map(r -> r.path("entity"))
+                .filter(e -> e.has("identifiers") && e.path("identifiers").has("ptyId"))
                 .map(this::mergeForSinglePtyId)
                 .collect(Collectors.toList());
     }
 
+    /* ─────────────────────────── MERGE ONE  ─────────────────────────── */
     private MergedEntity mergeForSinglePtyId(JsonNode financeEntity) {
+
         Identifiers identifiers = mapper.convertValue(financeEntity.path("identifiers"), Identifiers.class);
-        BusinessAddress businessAddress = mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
+        BusinessAddress businessAddress =
+                mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
+
         RegistrationAddress registrationAddress = financeEntity.has("registrationAddress")
                 ? mapper.convertValue(financeEntity.path("registrationAddress"), RegistrationAddress.class)
                 : null;
 
-        String ptyId = identifiers.getPtyId() != null ? identifiers.getPtyId().toString() : null;
+        String ptyId = identifiers.getPtyId();
 
-        List<KycSites> kycSites = null;
-        String kycSegment = null;
+        List<KycSites>     kycSites     = null;
+        String             kycSegment   = null;
         List<RiskIndustry> riskIndustry = null;
 
-        if (ptyId != null && token != null) {
+        if (ptyId != null && token != null && !token.isBlank()) {
             JsonNode kycRoot = fetchJson(kycUrl + "?ptyId=" + ptyId);
             JsonNode kycData = kycRoot.path("results").isArray() && kycRoot.path("results").size() > 0
                     ? kycRoot.path("results").get(0).path("kycData")
@@ -116,7 +122,7 @@ public class DataService {
                     riskIndustry = mapper.convertValue(kycData.path("riskIndustry"), new TypeReference<>() {});
                 }
             } else {
-                logger.info("No KYC data for ptyId: {}", ptyId);
+                logger.info("No KYC data found for ptyId {}", ptyId);
             }
         }
 
@@ -130,59 +136,64 @@ public class DataService {
         );
     }
 
+    /* ────────────────────────── GET JSON SAFE ───────────────────────── */
     private JsonNode fetchJson(String url) {
         try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.add("Accept", "*/*;version=gamma");
-            if (token != null && !token.isBlank()) {
-                headers.setBearerAuth(token);
-            }
+            HttpHeaders h = new HttpHeaders();
+            h.add("Accept", "*/*;version=gamma");
+            if (token != null && !token.isBlank()) h.setBearerAuth(token);
 
-            HttpEntity<String> request = new HttpEntity<>(headers);
-            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, request, String.class);
+            ResponseEntity<String> res = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(h), String.class);
 
-            if (!response.getStatusCode().is2xxSuccessful()) {
-                logger.error("GET {} failed with status {}", url, response.getStatusCode());
+            if (!res.getStatusCode().is2xxSuccessful()) {
+                logger.error("GET {} returned status {}", url, res.getStatusCode());
                 return mapper.createObjectNode();
             }
-
-            return mapper.readTree(response.getBody());
+            return mapper.readTree(res.getBody());
         } catch (Exception e) {
-            logger.error("Exception while calling {}", url, e);
+            logger.error("Exception while fetching {}", url, e);
             return mapper.createObjectNode();
         }
     }
 
+    /* ──────────────────── EXPORT TO SEMI‑COLON CSV ──────────────────── */
     public void exportMergedEntitiesToFile(String filePath) {
         List<MergedEntity> entities = getMergedEntities();
 
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(filePath))) {
+        // Ensure output directory exists
+        File outFile = new File(filePath);
+        outFile.getParentFile().mkdirs();
+
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(outFile))) {
             writer.write("CRDSCODE;Registration Address;Country;Site BNPP;Site Country;Site Status;KYC Segment;RIC\n");
 
             for (MergedEntity entity : entities) {
-                Identifiers id = entity.getIdentifiers().get(0);
+                if (entity.getIdentifiers() == null || entity.getIdentifiers().isEmpty()) continue;
+
+                Identifiers id   = entity.getIdentifiers().get(0);
+                String crdsCode  = safe(id.getCrdsCode());
+
                 RegistrationAddress reg = entity.getRegistrationAddress();
-
-                String crdsCode = safe(id.getCrdsCode());
-
                 String regAddress = reg != null
-                        ? safe(reg.getLine1()) + safe(reg.getLine2()) + safe(reg.getCity())
-                            + safe(reg.getState()) + safe(reg.getZipCode())
+                        ? Stream.of(reg.getLine1(), reg.getLine2(), reg.getCity(), reg.getState(), reg.getZipCode())
+                                .filter(s -> s != null && !s.isBlank())
+                                .map(this::safe)
+                                .collect(Collectors.joining(" "))
                         : "";
 
                 String regCountry = reg != null ? safe(reg.getCountry()) : "";
 
                 KycSites site = entity.getKycSites() != null && !entity.getKycSites().isEmpty()
-                        ? entity.getKycSites().get(0)
-                        : null;
+                        ? entity.getKycSites().get(0) : null;
 
-                String siteName = site != null ? safe(site.getSiteName()) : "";
+                String siteName    = site != null ? safe(site.getSiteName())    : "";
                 String siteCountry = site != null ? safe(site.getSiteCountry()) : "";
-                String siteStatus = site != null ? safe(site.getSiteStatus()) : "";
-                String kycSegment = safe(entity.getKycSegment());
+                String siteStatus  = site != null ? safe(site.getSiteStatus())  : "";
+
+                String kycSegment  = safe(entity.getKycSegment());
 
                 String ric = "";
-                if (entity.getRiskIndustry() != null) {
+                if (entity.getRiskIndustry() != null && !entity.getRiskIndustry().isEmpty()) {
                     ric = entity.getRiskIndustry().stream()
                             .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
                             .collect(Collectors.joining(","));
@@ -193,14 +204,15 @@ public class DataService {
                 writer.write(row + "\n");
             }
 
-            logger.info("File successfully written to {}", filePath);
+            logger.info("File successfully written to {}", outFile.getAbsolutePath());
 
         } catch (IOException e) {
-            logger.error("Error writing to file", e);
+            logger.error("Error writing to file {}", filePath, e);
         }
     }
 
-    private String safe(String value) {
-        return value == null ? "" : value.trim().replaceAll(";", " ");
+    /* ─────────────────────────── UTIL SAFE ──────────────────────────── */
+    private String safe(String v) {
+        return v == null ? "" : v.trim().replace(";", " ");
     }
 }
