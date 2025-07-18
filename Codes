@@ -13,6 +13,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -47,6 +50,25 @@ public class DataService {
         this.mergedEntityRepository = mergedEntityRepository;
     }
 
+    /**
+     * Unified method to process merged entities with options for both database and CSV output
+     */
+    @Transactional
+    public void processMergedEntities(boolean saveToDb, String csvFilePath) {
+        List<MergedEntity> entities = getMergedEntities();
+        
+        if (saveToDb) {
+            saveToDatabase(entities);
+        }
+        
+        if (csvFilePath != null && !csvFilePath.isEmpty()) {
+            exportToCsv(entities, csvFilePath);
+        }
+    }
+
+    /**
+     * Fetches authentication token from auth service
+     */
     private void fetchAuthToken() {
         try {
             HttpHeaders headers = new HttpHeaders();
@@ -76,10 +98,13 @@ public class DataService {
         }
     }
 
+    /**
+     * Retrieves merged entities from all data sources
+     */
     public List<MergedEntity> getMergedEntities() {
         fetchAuthToken();
         JsonNode financeResults = fetchJson(financeChUrl).path("results");
-        logger.info("Finance results count: {}", financeResults.size());
+        logger.info("Retrieved {} finance entities", financeResults.size());
 
         return StreamSupport.stream(financeResults.spliterator(), false)
                 .map(result -> result.path("entity"))
@@ -88,6 +113,9 @@ public class DataService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Merges data for a single entity based on its identifiers
+     */
     private MergedEntity mergeForSinglePtyId(JsonNode financeEntity) {
         Identifiers identifiers = mapper.convertValue(financeEntity.path("identifiers"), Identifiers.class);
         BusinessAddress businessAddress = mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
@@ -130,6 +158,9 @@ public class DataService {
         );
     }
 
+    /**
+     * Makes HTTP request and returns JSON response
+     */
     private JsonNode fetchJson(String url) {
         try {
             HttpHeaders headers = new HttpHeaders();
@@ -153,128 +184,132 @@ public class DataService {
         }
     }
 
-    @Transactional
-    public void exportMergedEntitiesToDatabase() {
-        List<MergedEntity> entities = getMergedEntities();
-        
-        // Clear existing data
+    /**
+     * Saves entities to H2 database
+     */
+    private void saveToDatabase(List<MergedEntity> entities) {
         mergedEntityRepository.deleteAll();
         
         entities.forEach(entity -> {
-            MergedEntityRecord record = new MergedEntityRecord();
-            Identifiers id = entity.getIdentifiers().get(0);
-            RegistrationAddress reg = entity.getRegistrationAddress();
-
-            record.setCrdsCode(safe(id.getCrdsCode()));
-            
-            if (reg != null) {
-                record.setRegistrationAddress(
-                    safe(reg.getLine1()) + " " + 
-                    safe(reg.getLine2()) + " " + 
-                    safe(reg.getCity()) + " " + 
-                    safe(reg.getState()) + " " + 
-                    safe(reg.getZipCode())
-                );
-                record.setCountry(safe(reg.getCountry()));
-            }
-
-            KycSites site = entity.getKycSites() != null && !entity.getKycSites().isEmpty() 
-                ? entity.getKycSites().get(0) 
-                : null;
-
-            if (site != null) {
-                record.setSiteName(safe(site.getSiteName()));
-                record.setSiteCountry(safe(site.getSiteCountry()));
-                record.setSiteStatus(safe(site.getSiteStatus()));
-            }
-
-            record.setKycSegment(safe(entity.getKycSegment()));
-
-            if (entity.getRiskIndustry() != null) {
-                record.setRiskIndustryCodes(
-                    entity.getRiskIndustry().stream()
-                        .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
-                        .collect(Collectors.joining(","))
-                );
-            }
-
+            MergedEntityRecord record = convertToRecord(entity);
             mergedEntityRepository.save(record);
         });
-
+        
         logger.info("Saved {} entities to database", entities.size());
     }
 
+    /**
+     * Converts MergedEntity to database record format
+     */
+    private MergedEntityRecord convertToRecord(MergedEntity entity) {
+        MergedEntityRecord record = new MergedEntityRecord();
+        Identifiers id = entity.getIdentifiers().get(0);
+        RegistrationAddress reg = entity.getRegistrationAddress();
+
+        record.setCrdsCode(safe(id.getCrdsCode()));
+        
+        if (reg != null) {
+            record.setRegistrationAddress(
+                safe(reg.getLine1()) + " " + 
+                safe(reg.getLine2()) + " " + 
+                safe(reg.getCity()) + " " + 
+                safe(reg.getState()) + " " + 
+                safe(reg.getZipCode())
+            );
+            record.setCountry(safe(reg.getCountry()));
+        }
+
+        KycSites site = entity.getKycSites() != null && !entity.getKycSites().isEmpty() 
+            ? entity.getKycSites().get(0) 
+            : null;
+
+        if (site != null) {
+            record.setSiteName(safe(site.getSiteName()));
+            record.setSiteCountry(safe(site.getSiteCountry()));
+            record.setSiteStatus(safe(site.getSiteStatus()));
+        }
+
+        record.setKycSegment(safe(entity.getKycSegment()));
+
+        if (entity.getRiskIndustry() != null) {
+            record.setRiskIndustryCodes(
+                entity.getRiskIndustry().stream()
+                    .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
+                    .collect(Collectors.joining(","))
+            );
+        }
+        
+        return record;
+    }
+
+    /**
+     * Exports entities to CSV file
+     */
+    private void exportToCsv(List<MergedEntity> entities, String filePath) {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(filePath))) {
+            writer.write("CRDSCODE;Registration Address;Country;Site BNPP;Site Country;Site Status;KYC Segment;RIC\n");
+
+            for (MergedEntity entity : entities) {
+                String csvLine = convertToCsvLine(entity);
+                writer.write(csvLine + "\n");
+            }
+
+            logger.info("CSV file successfully written to {}", filePath);
+        } catch (IOException e) {
+            logger.error("Error writing to CSV file", e);
+        }
+    }
+
+    /**
+     * Converts MergedEntity to CSV line format
+     */
+    private String convertToCsvLine(MergedEntity entity) {
+        Identifiers id = entity.getIdentifiers().get(0);
+        RegistrationAddress reg = entity.getRegistrationAddress();
+
+        String csvLine = String.join(";",
+            safe(id.getCrdsCode()),
+            reg != null ? formatRegistrationAddress(reg) : "",
+            reg != null ? safe(reg.getCountry()) : "",
+            entity.getKycSites() != null && !entity.getKycSites().isEmpty() ? 
+                safe(entity.getKycSites().get(0).getSiteName()) : "",
+            entity.getKycSites() != null && !entity.getKycSites().isEmpty() ? 
+                safe(entity.getKycSites().get(0).getSiteCountry()) : "",
+            entity.getKycSites() != null && !entity.getKycSites().isEmpty() ? 
+                safe(entity.getKycSites().get(0).getSiteStatus()) : "",
+            safe(entity.getKycSegment()),
+            entity.getRiskIndustry() != null ? formatRiskIndustries(entity.getRiskIndustry()) : ""
+        );
+
+        return csvLine;
+    }
+
+    /**
+     * Formats registration address components into a single string
+     */
+    private String formatRegistrationAddress(RegistrationAddress address) {
+        return String.join(" ",
+            safe(address.getLine1()),
+            safe(address.getLine2()),
+            safe(address.getCity()),
+            safe(address.getState()),
+            safe(address.getZipCode())
+        );
+    }
+
+    /**
+     * Formats risk industries into comma-separated string
+     */
+    private String formatRiskIndustries(List<RiskIndustry> riskIndustries) {
+        return riskIndustries.stream()
+            .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
+            .collect(Collectors.joining(","));
+    }
+
+    /**
+     * Safely handles string values (null checks and sanitization)
+     */
     private String safe(String value) {
-        return value == null ? "" : value.trim().replaceAll(";", " ");
+        return (value == null) ? "" : value.trim().replaceAll(";", " ");
     }
 }
-
-
-
-
-# H2 Database Configuration
-spring.datasource.url=jdbc:h2:mem:bnpdb
-spring.datasource.driverClassName=org.h2.Driver
-spring.datasource.username=sa
-spring.datasource.password=
-spring.h2.console.enabled=true
-spring.h2.console.path=/h2-console
-
-# JPA/Hibernate properties
-spring.jpa.show-sql=true
-spring.jpa.hibernate.ddl-auto=update
-spring.jpa.properties.hibernate.format_sql=true
-
-
-
-package com.bnp.repository;
-
-import com.bnp.model.MergedEntityRecord;
-import org.springframework.data.jpa.repository.JpaRepository;
-
-public interface MergedEntityRepository extends JpaRepository<MergedEntityRecord, Long> {
-}
-
-
-
-
-package com.bnp.model;
-
-import jakarta.persistence.*;
-import lombok.Getter;
-import lombok.Setter;
-
-@Entity
-@Table(name = "merged_entities")
-@Getter
-@Setter
-public class MergedEntityRecord {
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-    
-    @Column(name = "crds_code")
-    private String crdsCode;
-    
-    @Column(name = "registration_address", length = 1000)
-    private String registrationAddress;
-    
-    @Column(name = "country")
-    private String country;
-    
-    @Column(name = "site_name")
-    private String siteName;
-    
-    @Column(name = "site_country")
-    private String siteCountry;
-    
-    @Column(name = "site_status")
-    private String siteStatus;
-    
-    @Column(name = "kyc_segment")
-    private String kycSegment;
-    
-    @Column(name = "risk_industry_codes", length = 1000)
-    private String riskIndustryCodes;
-}
-
