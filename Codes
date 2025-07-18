@@ -5,6 +5,7 @@ import com.bnp.repository.MergedEntityRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -13,12 +14,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
 
-import java.io.BufferedWriter;
-import java.io.FileWriter;
-import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
 @Service
@@ -50,25 +49,6 @@ public class DataService {
         this.mergedEntityRepository = mergedEntityRepository;
     }
 
-    /**
-     * Unified method to process merged entities with options for both database and CSV output
-     */
-    @Transactional
-    public void processMergedEntities(boolean saveToDb, String csvFilePath) {
-        List<MergedEntity> entities = getMergedEntities();
-        
-        if (saveToDb) {
-            saveToDatabase(entities);
-        }
-        
-        if (csvFilePath != null && !csvFilePath.isEmpty()) {
-            exportToCsv(entities, csvFilePath);
-        }
-    }
-
-    /**
-     * Fetches authentication token from auth service
-     */
     private void fetchAuthToken() {
         try {
             HttpHeaders headers = new HttpHeaders();
@@ -76,46 +56,87 @@ public class DataService {
             headers.set("Authorization", basicAuth);
             headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
 
-            HttpEntity<String> request = new HttpEntity<>("", headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(authTokenUrl, request, String.class);
+            ResponseEntity<String> response =
+                    restTemplate.postForEntity(authTokenUrl, new HttpEntity<>("", headers), String.class);
 
             if (!response.getStatusCode().is2xxSuccessful()) {
-                logger.error("Auth token API failed: {}", response.getStatusCode());
+                logger.error("Auth API response: {}", response.getStatusCode());
                 token = null;
                 return;
             }
 
-            JsonNode json = mapper.readTree(response.getBody());
-            token = json.path("access_token").asText(null);
-
+            token = mapper.readTree(response.getBody()).path("access_token").asText(null);
             if (token == null || token.isBlank()) {
-                logger.error("Access token missing in auth response");
+                logger.error("access_token missing in auth response");
             }
-
-        } catch (Exception e) {
-            logger.error("Error while fetching auth token", e);
+        } catch (Exception ex) {
+            logger.error("Error fetching auth token", ex);
             token = null;
         }
     }
 
-    /**
-     * Retrieves merged entities from all data sources
-     */
-    public List<MergedEntity> getMergedEntities() {
+    @Transactional
+    public void saveMergedEntitiesToDatabase() {
         fetchAuthToken();
         JsonNode financeResults = fetchJson(financeChUrl).path("results");
-        logger.info("Retrieved {} finance entities", financeResults.size());
+        logger.info("Finance results count: {}", financeResults.size());
 
-        return StreamSupport.stream(financeResults.spliterator(), false)
-                .map(result -> result.path("entity"))
-                .filter(entity -> entity.has("identifiers") && entity.path("identifiers").has("ptyId"))
+        List<com.bnp.model.MergedEntity> dbEntities = StreamSupport.stream(financeResults.spliterator(), false)
+                .map(r -> r.path("entity"))
+                .filter(e -> e.has("identifiers") && e.path("identifiers").has("ptyId"))
                 .map(this::mergeForSinglePtyId)
+                .filter(entity -> entity.getKycSites() != null && !entity.getKycSites().isEmpty())
+                .map(this::convertToDbEntity)
                 .collect(Collectors.toList());
+
+        // Clear existing data before saving new batch
+        mergedEntityRepository.deleteAll();
+        mergedEntityRepository.saveAll(dbEntities);
+        logger.info("Saved {} entities to database", dbEntities.size());
     }
 
-    /**
-     * Merges data for a single entity based on its identifiers
-     */
+    private com.bnp.model.MergedEntity convertToDbEntity(MergedEntity mergedEntity) {
+        Identifiers id = mergedEntity.getIdentifiers().get(0);
+        String crdsCode = safe(id.getCrdsCode());
+
+        RegistrationAddress reg = mergedEntity.getRegistrationAddress();
+        String regAddress = reg != null
+                ? Stream.of(reg.getLine1(), reg.getLine2(), reg.getCity(), reg.getState(), reg.getZipCode())
+                    .filter(s -> s != null && !s.isBlank())
+                    .map(this::safe)
+                    .collect(Collectors.joining(" "))
+                : "";
+
+        String regCountry = reg != null ? safe(reg.getCountry()) : "";
+
+        KycSites site = mergedEntity.getKycSites() != null && !mergedEntity.getKycSites().isEmpty()
+                ? mergedEntity.getKycSites().get(0) : null;
+
+        String siteName = site != null ? safe(site.getSiteName()) : "";
+        String siteCountry = site != null ? safe(site.getSiteCountry()) : "";
+        String siteStatus = site != null ? safe(site.getSiteStatus()) : "";
+
+        String kycSegment = safe(mergedEntity.getKycSegment());
+
+        String ric = "";
+        if (mergedEntity.getRiskIndustry() != null && !mergedEntity.getRiskIndustry().isEmpty()) {
+            ric = mergedEntity.getRiskIndustry().stream()
+                    .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
+                    .collect(Collectors.joining(","));
+        }
+
+        return new com.bnp.model.MergedEntity(
+                crdsCode,
+                regAddress,
+                regCountry,
+                siteName,
+                siteCountry,
+                siteStatus,
+                kycSegment,
+                ric
+        );
+    }
+
     private MergedEntity mergeForSinglePtyId(JsonNode financeEntity) {
         Identifiers identifiers = mapper.convertValue(financeEntity.path("identifiers"), Identifiers.class);
         BusinessAddress businessAddress = mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
@@ -123,13 +144,13 @@ public class DataService {
                 ? mapper.convertValue(financeEntity.path("registrationAddress"), RegistrationAddress.class)
                 : null;
 
-        String ptyId = identifiers.getPtyId() != null ? identifiers.getPtyId().toString() : null;
+        String ptyId = identifiers.getPtyId();
 
         List<KycSites> kycSites = null;
         String kycSegment = null;
         List<RiskIndustry> riskIndustry = null;
 
-        if (ptyId != null && token != null) {
+        if (ptyId != null && token != null && !token.isBlank()) {
             JsonNode kycRoot = fetchJson(kycUrl + "?ptyId=" + ptyId);
             JsonNode kycData = kycRoot.path("results").isArray() && kycRoot.path("results").size() > 0
                     ? kycRoot.path("results").get(0).path("kycData")
@@ -144,7 +165,7 @@ public class DataService {
                     riskIndustry = mapper.convertValue(kycData.path("riskIndustry"), new TypeReference<>() {});
                 }
             } else {
-                logger.info("No KYC data for ptyId: {}", ptyId);
+                logger.info("No KYC data found for ptyId {}", ptyId);
             }
         }
 
@@ -158,158 +179,26 @@ public class DataService {
         );
     }
 
-    /**
-     * Makes HTTP request and returns JSON response
-     */
     private JsonNode fetchJson(String url) {
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.add("Accept", "*/*;version=gamma");
-            if (token != null && !token.isBlank()) {
-                headers.setBearerAuth(token);
-            }
+            if (token != null && !token.isBlank()) headers.setBearerAuth(token);
 
-            HttpEntity<String> request = new HttpEntity<>(headers);
-            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, request, String.class);
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(headers), String.class);
 
             if (!response.getStatusCode().is2xxSuccessful()) {
-                logger.error("GET {} failed with status {}", url, response.getStatusCode());
+                logger.error("GET {} returned {}", url, response.getStatusCode());
                 return mapper.createObjectNode();
             }
-
             return mapper.readTree(response.getBody());
         } catch (Exception e) {
-            logger.error("Exception while calling {}", url, e);
+            logger.error("Exception while fetching {}", url, e);
             return mapper.createObjectNode();
         }
     }
 
-    /**
-     * Saves entities to H2 database
-     */
-    private void saveToDatabase(List<MergedEntity> entities) {
-        mergedEntityRepository.deleteAll();
-        
-        entities.forEach(entity -> {
-            MergedEntityRecord record = convertToRecord(entity);
-            mergedEntityRepository.save(record);
-        });
-        
-        logger.info("Saved {} entities to database", entities.size());
-    }
-
-    /**
-     * Converts MergedEntity to database record format
-     */
-    private MergedEntityRecord convertToRecord(MergedEntity entity) {
-        MergedEntityRecord record = new MergedEntityRecord();
-        Identifiers id = entity.getIdentifiers().get(0);
-        RegistrationAddress reg = entity.getRegistrationAddress();
-
-        record.setCrdsCode(safe(id.getCrdsCode()));
-        
-        if (reg != null) {
-            record.setRegistrationAddress(
-                safe(reg.getLine1()) + " " + 
-                safe(reg.getLine2()) + " " + 
-                safe(reg.getCity()) + " " + 
-                safe(reg.getState()) + " " + 
-                safe(reg.getZipCode())
-            );
-            record.setCountry(safe(reg.getCountry()));
-        }
-
-        KycSites site = entity.getKycSites() != null && !entity.getKycSites().isEmpty() 
-            ? entity.getKycSites().get(0) 
-            : null;
-
-        if (site != null) {
-            record.setSiteName(safe(site.getSiteName()));
-            record.setSiteCountry(safe(site.getSiteCountry()));
-            record.setSiteStatus(safe(site.getSiteStatus()));
-        }
-
-        record.setKycSegment(safe(entity.getKycSegment()));
-
-        if (entity.getRiskIndustry() != null) {
-            record.setRiskIndustryCodes(
-                entity.getRiskIndustry().stream()
-                    .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
-                    .collect(Collectors.joining(","))
-            );
-        }
-        
-        return record;
-    }
-
-    /**
-     * Exports entities to CSV file
-     */
-    private void exportToCsv(List<MergedEntity> entities, String filePath) {
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(filePath))) {
-            writer.write("CRDSCODE;Registration Address;Country;Site BNPP;Site Country;Site Status;KYC Segment;RIC\n");
-
-            for (MergedEntity entity : entities) {
-                String csvLine = convertToCsvLine(entity);
-                writer.write(csvLine + "\n");
-            }
-
-            logger.info("CSV file successfully written to {}", filePath);
-        } catch (IOException e) {
-            logger.error("Error writing to CSV file", e);
-        }
-    }
-
-    /**
-     * Converts MergedEntity to CSV line format
-     */
-    private String convertToCsvLine(MergedEntity entity) {
-        Identifiers id = entity.getIdentifiers().get(0);
-        RegistrationAddress reg = entity.getRegistrationAddress();
-
-        String csvLine = String.join(";",
-            safe(id.getCrdsCode()),
-            reg != null ? formatRegistrationAddress(reg) : "",
-            reg != null ? safe(reg.getCountry()) : "",
-            entity.getKycSites() != null && !entity.getKycSites().isEmpty() ? 
-                safe(entity.getKycSites().get(0).getSiteName()) : "",
-            entity.getKycSites() != null && !entity.getKycSites().isEmpty() ? 
-                safe(entity.getKycSites().get(0).getSiteCountry()) : "",
-            entity.getKycSites() != null && !entity.getKycSites().isEmpty() ? 
-                safe(entity.getKycSites().get(0).getSiteStatus()) : "",
-            safe(entity.getKycSegment()),
-            entity.getRiskIndustry() != null ? formatRiskIndustries(entity.getRiskIndustry()) : ""
-        );
-
-        return csvLine;
-    }
-
-    /**
-     * Formats registration address components into a single string
-     */
-    private String formatRegistrationAddress(RegistrationAddress address) {
-        return String.join(" ",
-            safe(address.getLine1()),
-            safe(address.getLine2()),
-            safe(address.getCity()),
-            safe(address.getState()),
-            safe(address.getZipCode())
-        );
-    }
-
-    /**
-     * Formats risk industries into comma-separated string
-     */
-    private String formatRiskIndustries(List<RiskIndustry> riskIndustries) {
-        return riskIndustries.stream()
-            .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
-            .collect(Collectors.joining(","));
-    }
-
-    /**
-     * Safely handles string values (null checks and sanitization)
-     */
-    private String safe(String value) {
-        return (value == null) ? "" : value.trim().replaceAll(";", " ");
+    private String safe(String v) {
+        return v == null ? "" : v.trim().replace(";", " ");
     }
 }
