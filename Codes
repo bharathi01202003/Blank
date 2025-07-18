@@ -3,21 +3,27 @@ private MergedEntityRecord convertToDbEntity(MergedEntity mergedEntity) {
     RegistrationAddress reg = mergedEntity.getRegistrationAddress();
     KycSites site = mergedEntity.getKycSites().isEmpty() ? null : mergedEntity.getKycSites().get(0);
 
+    // Handle registration address components
+    String regAddress = reg != null ? 
+        Stream.of(reg.getLine1(), reg.getLine2(), reg.getCity(), reg.getState(), reg.getZipCode())
+            .filter(s -> s != null && !s.isBlank())
+            .map(this::safe)
+            .collect(Collectors.joining(" "))
+        : "";
+
+    // Handle risk industry codes
+    String riskCodes = mergedEntity.getRiskIndustry().stream()
+        .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
+        .collect(Collectors.joining(","));
+
     return MergedEntityRecord.builder()
-            .crdsCode(safe(id.getCrdsCode()))
-            .registrationAddress(reg != null ? 
-                Stream.of(reg.getLine1(), reg.getLine2(), reg.getCity(), reg.getState(), reg.getZipCode())
-                    .filter(s -> s != null && !s.isBlank())
-                    .map(this::safe)
-                    .collect(Collectors.joining(" "))
-                : "")
-            .country(reg != null ? safe(reg.getCountry()) : "")
-            .siteName(site != null ? safe(site.getSiteName()) : "")
-            .siteCountry(site != null ? safe(site.getSiteCountry()) : "")
-            .siteStatus(site != null ? safe(site.getSiteStatus()) : "")
-            .kycSegment(safe(mergedEntity.getKycSegment()))
-            .riskIndustryCodes(mergedEntity.getRiskIndustry().stream()
-                .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
-                .collect(Collectors.joining(",")))
-            .build();
+        .crdsCode(safe(id.getCrdsCode()))
+        .registrationAddress(regAddress)
+        .country(reg != null ? safe(reg.getCountry()) : "")
+        .siteName(site != null ? safe(site.getSiteName()) : "")
+        .siteCountry(site != null ? safe(site.getSiteCountry()) : "")
+        .siteStatus(site != null ? safe(site.getSiteStatus()) : "")
+        .kycSegment(safe(mergedEntity.getKycSegment()))
+        .riskIndustryCodes(riskCodes)
+        .build();
 }
