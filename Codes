@@ -1,181 +1,280 @@
 package com.bnp.service;
 
 import com.bnp.model.*;
+import com.bnp.repository.MergedEntityRepository;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.opencsv.CSVWriter;
-import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
 
-import java.io.FileWriter;
-import java.io.Writer;
-import java.util.*;
+import java.util.Collections;
+import java.util.List;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 @Service
-@RequiredArgsConstructor
 public class DataService {
 
-    private final Logger logger = LoggerFactory.getLogger(DataService.class);
+    private static final Logger logger = LoggerFactory.getLogger(DataService.class);
 
     private final RestTemplate restTemplate;
-    private final ObjectMapper objectMapper;
+    private final ObjectMapper mapper;
+    private final MergedEntityRepository mergedEntityRepository;
 
-    @Value("${api.auth.url}")
-    private String authUrl;
-
-    @Value("${api.auth.authorization-header}")
-    private String authHeader;  // e.g., Basic <encoded string>
-
-    @Value("${api.finance.url}")
-    private String financeUrl;
+    @Value("${api.financech.url}")
+    private String financeChUrl;
 
     @Value("${api.kyc.url}")
     private String kycUrl;
 
-    public void exportAllCrdsCodesToCsv(String filePath) {
-        String token = fetchAuthToken();
-        if (token == null) {
-            logger.error("Failed to fetch token. Aborting.");
-            return;
-        }
+    @Value("${auth.token.url}")
+    private String authTokenUrl;
 
-        List<FinanceEntity> financeEntities = fetchFinanceData(token);
-        List<KycEntity> kycEntities = fetchKycData(token);
+    @Value("${auth.basic.auth}")
+    private String basicAuth;
 
-        if (financeEntities == null || kycEntities == null) {
-            logger.error("Failed to fetch data from APIs.");
-            return;
-        }
+    private String token;
 
-        Map<Integer, KycData> kycDataMap = kycEntities.stream()
-            .map(KycEntity::getKycData)
-            .filter(Objects::nonNull)
-            .collect(Collectors.toMap(KycData::getKycId, k -> k, (a, b) -> a));
-
-        try (Writer writer = new FileWriter(filePath);
-             CSVWriter csvWriter = new CSVWriter(writer)) {
-
-            csvWriter.writeNext(new String[]{
-                "CRDSCODE", "Registration Address", "Country",
-                "Site BNPP", "Site Country", "Site Status",
-                "KYC Segment", "RIC"
-            });
-
-            for (FinanceEntity entity : financeEntities) {
-                BusinessAddress address = entity.getBusinessAddress();
-                String regAddress = buildAddressString(address);
-                String country = address != null ? safe(address.getCountry()) : "";
-
-                for (Identifiers id : entity.getIdentifiers()) {
-                    String crdsCode = id.getCrdsCode();
-                    Integer kycId = id.getKycId();
-
-                    KycData kycData = kycId != null ? kycDataMap.get(kycId) : null;
-
-                    String siteBnpp = "";
-                    String siteCountry = "";
-                    String siteStatus = "";
-                    String kycSegment = "";
-                    String ric = "";
-
-                    if (kycData != null) {
-                        Optional<KycSites> site = Optional.ofNullable(kycData.getKycSites())
-                            .flatMap(list -> list.stream().findFirst());
-
-                        siteBnpp = site.map(KycSites::getSiteBNPP).orElse("");
-                        siteCountry = site.map(KycSites::getCountry).orElse("");
-                        siteStatus = site.map(KycSites::getSiteStatus).orElse("");
-                        kycSegment = safe(kycData.getKycSegment());
-                        ric = Optional.ofNullable(kycData.getRiskIndustry())
-                            .flatMap(list -> list.stream().findFirst())
-                            .map(r -> r.getCode() + "-" + r.getDescription())
-                            .orElse("");
-                    }
-
-                    csvWriter.writeNext(new String[]{
-                        safe(crdsCode), regAddress, country,
-                        siteBnpp, siteCountry, siteStatus,
-                        kycSegment, ric
-                    });
-                }
-            }
-
-            logger.info("CSV written to: {}", filePath);
-
-        } catch (Exception e) {
-            logger.error("Error writing CSV", e);
-        }
+    public DataService(RestTemplate restTemplate, MergedEntityRepository mergedEntityRepository) {
+        this.restTemplate = restTemplate;
+        this.mapper = new ObjectMapper();
+        this.mergedEntityRepository = mergedEntityRepository;
     }
 
-    private String fetchAuthToken() {
+    private void fetchAuthToken() {
         try {
             HttpHeaders headers = new HttpHeaders();
-            headers.set("Authorization", authHeader);
-            headers.set("Accept", "*/*;version=gamma");
             headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+            headers.set("Authorization", basicAuth);
+            headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
 
             HttpEntity<String> request = new HttpEntity<>("", headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(authUrl, request, String.class);
+            ResponseEntity<String> response = restTemplate.postForEntity(authTokenUrl, request, String.class);
 
-            if (response.getStatusCode() == HttpStatus.OK) {
-                JsonNode json = objectMapper.readTree(response.getBody());
-                return json.get("access_token").asText();
-            } else {
-                logger.error("Failed to fetch token. Status: {}", response.getStatusCode());
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                logger.error("Auth token API failed: {}", response.getStatusCode());
+                token = null;
+                return;
             }
+
+            JsonNode json = mapper.readTree(response.getBody());
+            token = json.path("access_token").asText(null);
+
+            if (token == null || token.isBlank()) {
+                logger.error("Access token missing in auth response");
+            }
+
         } catch (Exception e) {
-            logger.error("Error fetching token", e);
+            logger.error("Error while fetching auth token", e);
+            token = null;
         }
-        return null;
     }
 
-    private List<FinanceEntity> fetchFinanceData(String token) {
+    public List<MergedEntity> getMergedEntities() {
+        fetchAuthToken();
+        JsonNode financeResults = fetchJson(financeChUrl).path("results");
+        logger.info("Finance results count: {}", financeResults.size());
+
+        return StreamSupport.stream(financeResults.spliterator(), false)
+                .map(result -> result.path("entity"))
+                .filter(entity -> entity.has("identifiers") && entity.path("identifiers").has("ptyId"))
+                .map(this::mergeForSinglePtyId)
+                .collect(Collectors.toList());
+    }
+
+    private MergedEntity mergeForSinglePtyId(JsonNode financeEntity) {
+        Identifiers identifiers = mapper.convertValue(financeEntity.path("identifiers"), Identifiers.class);
+        BusinessAddress businessAddress = mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
+        RegistrationAddress registrationAddress = financeEntity.has("registrationAddress")
+                ? mapper.convertValue(financeEntity.path("registrationAddress"), RegistrationAddress.class)
+                : null;
+
+        String ptyId = identifiers.getPtyId() != null ? identifiers.getPtyId().toString() : null;
+
+        List<KycSites> kycSites = null;
+        String kycSegment = null;
+        List<RiskIndustry> riskIndustry = null;
+
+        if (ptyId != null && token != null) {
+            JsonNode kycRoot = fetchJson(kycUrl + "?ptyId=" + ptyId);
+            JsonNode kycData = kycRoot.path("results").isArray() && kycRoot.path("results").size() > 0
+                    ? kycRoot.path("results").get(0).path("kycData")
+                    : mapper.createObjectNode();
+
+            if (!kycData.isMissingNode()) {
+                if (kycData.path("kycSites").isArray()) {
+                    kycSites = mapper.convertValue(kycData.path("kycSites"), new TypeReference<>() {});
+                }
+                kycSegment = kycData.has("kycSegment") ? kycData.path("kycSegment").asText(null) : null;
+                if (kycData.path("riskIndustry").isArray()) {
+                    riskIndustry = mapper.convertValue(kycData.path("riskIndustry"), new TypeReference<>() {});
+                }
+            } else {
+                logger.info("No KYC data for ptyId: {}", ptyId);
+            }
+        }
+
+        return new MergedEntity(
+                List.of(identifiers),
+                businessAddress,
+                registrationAddress,
+                kycSites,
+                kycSegment,
+                riskIndustry
+        );
+    }
+
+    private JsonNode fetchJson(String url) {
         try {
             HttpHeaders headers = new HttpHeaders();
-            headers.setBearerAuth(token);
-            HttpEntity<Void> request = new HttpEntity<>(headers);
+            headers.add("Accept", "*/*;version=gamma");
+            if (token != null && !token.isBlank()) {
+                headers.setBearerAuth(token);
+            }
 
-            ResponseEntity<FinanceResponse> response = restTemplate.exchange(
-                financeUrl, HttpMethod.GET, request, FinanceResponse.class);
+            HttpEntity<String> request = new HttpEntity<>(headers);
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, request, String.class);
 
-            return response.getBody() != null ? response.getBody().getResults() : Collections.emptyList();
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                logger.error("GET {} failed with status {}", url, response.getStatusCode());
+                return mapper.createObjectNode();
+            }
+
+            return mapper.readTree(response.getBody());
         } catch (Exception e) {
-            logger.error("Error fetching finance data", e);
-            return null;
+            logger.error("Exception while calling {}", url, e);
+            return mapper.createObjectNode();
         }
     }
 
-    private List<KycEntity> fetchKycData(String token) {
-        try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setBearerAuth(token);
-            HttpEntity<Void> request = new HttpEntity<>(headers);
+    @Transactional
+    public void exportMergedEntitiesToDatabase() {
+        List<MergedEntity> entities = getMergedEntities();
+        
+        // Clear existing data
+        mergedEntityRepository.deleteAll();
+        
+        entities.forEach(entity -> {
+            MergedEntityRecord record = new MergedEntityRecord();
+            Identifiers id = entity.getIdentifiers().get(0);
+            RegistrationAddress reg = entity.getRegistrationAddress();
 
-            ResponseEntity<KycResponse> response = restTemplate.exchange(
-                kycUrl, HttpMethod.GET, request, KycResponse.class);
+            record.setCrdsCode(safe(id.getCrdsCode()));
+            
+            if (reg != null) {
+                record.setRegistrationAddress(
+                    safe(reg.getLine1()) + " " + 
+                    safe(reg.getLine2()) + " " + 
+                    safe(reg.getCity()) + " " + 
+                    safe(reg.getState()) + " " + 
+                    safe(reg.getZipCode())
+                );
+                record.setCountry(safe(reg.getCountry()));
+            }
 
-            return response.getBody() != null ? response.getBody().getResults() : Collections.emptyList();
-        } catch (Exception e) {
-            logger.error("Error fetching KYC data", e);
-            return null;
-        }
+            KycSites site = entity.getKycSites() != null && !entity.getKycSites().isEmpty() 
+                ? entity.getKycSites().get(0) 
+                : null;
+
+            if (site != null) {
+                record.setSiteName(safe(site.getSiteName()));
+                record.setSiteCountry(safe(site.getSiteCountry()));
+                record.setSiteStatus(safe(site.getSiteStatus()));
+            }
+
+            record.setKycSegment(safe(entity.getKycSegment()));
+
+            if (entity.getRiskIndustry() != null) {
+                record.setRiskIndustryCodes(
+                    entity.getRiskIndustry().stream()
+                        .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
+                        .collect(Collectors.joining(","))
+                );
+            }
+
+            mergedEntityRepository.save(record);
+        });
+
+        logger.info("Saved {} entities to database", entities.size());
     }
 
-    private String buildAddressString(BusinessAddress addr) {
-        if (addr == null) return "";
-        return Stream.of(addr.getLine1(), addr.getLine2(), addr.getCity(), addr.getState(), addr.getZipcode())
-                .filter(Objects::nonNull)
-                .collect(Collectors.joining(" "));
-    }
-
-    private String safe(String val) {
-        return val != null ? val : "";
+    private String safe(String value) {
+        return value == null ? "" : value.trim().replaceAll(";", " ");
     }
 }
+
+
+
+
+# H2 Database Configuration
+spring.datasource.url=jdbc:h2:mem:bnpdb
+spring.datasource.driverClassName=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+
+# JPA/Hibernate properties
+spring.jpa.show-sql=true
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.properties.hibernate.format_sql=true
+
+
+
+package com.bnp.repository;
+
+import com.bnp.model.MergedEntityRecord;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface MergedEntityRepository extends JpaRepository<MergedEntityRecord, Long> {
+}
+
+
+
+
+package com.bnp.model;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.Setter;
+
+@Entity
+@Table(name = "merged_entities")
+@Getter
+@Setter
+public class MergedEntityRecord {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @Column(name = "crds_code")
+    private String crdsCode;
+    
+    @Column(name = "registration_address", length = 1000)
+    private String registrationAddress;
+    
+    @Column(name = "country")
+    private String country;
+    
+    @Column(name = "site_name")
+    private String siteName;
+    
+    @Column(name = "site_country")
+    private String siteCountry;
+    
+    @Column(name = "site_status")
+    private String siteStatus;
+    
+    @Column(name = "kyc_segment")
+    private String kycSegment;
+    
+    @Column(name = "risk_industry_codes", length = 1000)
+    private String riskIndustryCodes;
+}
+
