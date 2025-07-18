@@ -1,9 +1,12 @@
 package com.bnp.service;
 
 import com.bnp.model.*;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.extern.slf4j.Slf4j;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
@@ -12,163 +15,194 @@ import org.springframework.web.client.RestTemplate;
 import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
-import java.util.*;
+import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
-@Slf4j
 @Service
 public class DataService {
 
-    @Value("${finance.api.url}")
-    private String financeApiUrl;
+    private static final Logger logger = LoggerFactory.getLogger(DataService.class);
 
-    @Value("${kyc.api.url}")
-    private String kycApiUrl;
+    private final RestTemplate restTemplate;
+    private final ObjectMapper mapper;
+
+    @Value("${api.financech.url}")
+    private String financeChUrl;
+
+    @Value("${api.kyc.url}")
+    private String kycUrl;
 
     @Value("${auth.token.url}")
     private String authTokenUrl;
 
-    @Value("${auth.basic.token}")
-    private String authBasicToken;
+    @Value("${auth.basic.auth}")
+    private String basicAuth;
 
-    private final RestTemplate restTemplate;
-    private final ObjectMapper objectMapper;
+    private String token;
 
-    public DataService(RestTemplate restTemplate, ObjectMapper objectMapper) {
+    public DataService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
-        this.objectMapper = objectMapper;
+        this.mapper = new ObjectMapper();
     }
 
-    public String getAccessToken() {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Authorization", "Basic " + authBasicToken);
-        headers.set("Accept", "*/*;version=gamma");
-        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+    private void fetchAuthToken() {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+            headers.set("Authorization", basicAuth);
+            headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
 
-        HttpEntity<String> request = new HttpEntity<>(null, headers);
+            ResponseEntity<String> response =
+                    restTemplate.postForEntity(authTokenUrl, new HttpEntity<>("", headers), String.class);
 
-        ResponseEntity<String> response = restTemplate.exchange(authTokenUrl, HttpMethod.POST, request, String.class);
-        JsonNode root = objectMapper.readTree(response.getBody());
-        return root.path("access_token").asText();
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                logger.error("Auth API response: {}", response.getStatusCode());
+                token = null;
+                return;
+            }
+
+            token = mapper.readTree(response.getBody()).path("access_token").asText(null);
+            if (token == null || token.isBlank()) {
+                logger.error("access_token missing in auth response");
+            }
+        } catch (Exception ex) {
+            logger.error("Error fetching auth token", ex);
+            token = null;
+        }
     }
 
     public List<MergedEntity> getMergedEntities() {
-        String token = getAccessToken();
+        fetchAuthToken();
+        JsonNode financeResults = fetchJson(financeChUrl).path("results");
+        logger.info("Finance results count: {}", financeResults.size());
 
-        HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(token);
-        headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
+        return StreamSupport.stream(financeResults.spliterator(), false)
+                .map(r -> r.path("entity"))
+                .filter(e -> e.has("identifiers") && e.path("identifiers").has("ptyId"))
+                .map(this::mergeForSinglePtyId)
+                .filter(entity -> entity.getKycSites() != null && !entity.getKycSites().isEmpty())
+                .collect(Collectors.toList());
+    }
 
-        HttpEntity<Void> request = new HttpEntity<>(headers);
+    private MergedEntity mergeForSinglePtyId(JsonNode financeEntity) {
 
-        // Get finance data
-        ResponseEntity<String> financeResponse = restTemplate.exchange(
-                financeApiUrl, HttpMethod.GET, request, String.class);
+        Identifiers identifiers = mapper.convertValue(financeEntity.path("identifiers"), Identifiers.class);
+        BusinessAddress businessAddress = mapper.convertValue(financeEntity.path("businessAddress"), BusinessAddress.class);
+        RegistrationAddress registrationAddress = financeEntity.has("registrationAddress")
+                ? mapper.convertValue(financeEntity.path("registrationAddress"), RegistrationAddress.class)
+                : null;
 
-        JsonNode financeRoot = objectMapper.readTree(financeResponse.getBody());
-        List<File1Result> financeResults = objectMapper.readerForListOf(File1Result.class)
-                .readValue(financeRoot.path("results"));
+        String ptyId = identifiers.getPtyId();
 
-        List<MergedEntity> mergedEntities = new ArrayList<>();
+        List<KycSites> kycSites = null;
+        String kycSegment = null;
+        List<RiskIndustry> riskIndustry = null;
 
-        for (File1Result financeEntity : financeResults) {
-            List<Identifiers> identifiers = financeEntity.getEntity().getIdentifiers();
-            BusinessAddress registrationAddress = financeEntity.getEntity().getBusinessAddress();
+        if (ptyId != null && token != null && !token.isBlank()) {
+            JsonNode kycRoot = fetchJson(kycUrl + "?ptyId=" + ptyId);
+            JsonNode kycData = kycRoot.path("results").isArray() && kycRoot.path("results").size() > 0
+                    ? kycRoot.path("results").get(0).path("kycData")
+                    : mapper.createObjectNode();
 
-            if (identifiers != null) {
-                for (Identifiers id : identifiers) {
-                    if (id.getKycId() != null) {
-                        String kycUrlWithParam = kycApiUrl + "?kycId=" + id.getKycId();
-
-                        ResponseEntity<String> kycResponse = restTemplate.exchange(
-                                kycUrlWithParam, HttpMethod.GET, request, String.class);
-
-                        JsonNode kycRoot = objectMapper.readTree(kycResponse.getBody());
-                        JsonNode kycResultsNode = kycRoot.path("results");
-
-                        if (!kycResultsNode.isEmpty()) {
-                            File2Result kycResult = objectMapper.treeToValue(kycResultsNode.get(0), File2Result.class);
-
-                            MergedEntity merged = new MergedEntity();
-                            merged.setIdentifiers(Collections.singletonList(id));
-                            merged.setBusinessAddress(registrationAddress);
-                            merged.setKycSites(kycResult.getKycData().getKycSites());
-                            merged.setKycSegment(kycResult.getKycData().getKycSegment());
-                            merged.setRiskIndustries(kycResult.getKycData().getRiskIndustry());
-
-                            mergedEntities.add(merged);
-                        }
-                    }
+            if (!kycData.isMissingNode()) {
+                if (kycData.path("kycSites").isArray()) {
+                    kycSites = mapper.convertValue(kycData.path("kycSites"), new TypeReference<>() {});
                 }
+                kycSegment = kycData.has("kycSegment") ? kycData.path("kycSegment").asText(null) : null;
+                if (kycData.path("riskIndustry").isArray()) {
+                    riskIndustry = mapper.convertValue(kycData.path("riskIndustry"), new TypeReference<>() {});
+                }
+            } else {
+                logger.info("No KYC data found for ptyId {}", ptyId);
             }
         }
 
-        return mergedEntities;
+        return new MergedEntity(
+                List.of(identifiers),
+                businessAddress,
+                registrationAddress,
+                kycSites,
+                kycSegment,
+                riskIndustry
+        );
+    }
+
+    private JsonNode fetchJson(String url) {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.add("Accept", "*/*;version=gamma");
+            if (token != null && !token.isBlank()) headers.setBearerAuth(token);
+
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(headers), String.class);
+
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                logger.error("GET {} returned {}", url, response.getStatusCode());
+                return mapper.createObjectNode();
+            }
+            return mapper.readTree(response.getBody());
+        } catch (Exception e) {
+            logger.error("Exception while fetching {}", url, e);
+            return mapper.createObjectNode();
+        }
     }
 
     public void exportMergedEntitiesToFile(String filePath) {
-        try {
-            List<MergedEntity> mergedEntities = getMergedEntities();
+        List<MergedEntity> entities = getMergedEntities();
 
-            File file = new File(filePath);
-            File parent = file.getParentFile();
-            if (parent != null && !parent.exists()) {
-                parent.mkdirs();
-            }
+        File outFile = new File(filePath);
+        outFile.getParentFile().mkdirs();
 
-            BufferedWriter writer = new BufferedWriter(new FileWriter(file));
-            writer.write("CRDSCODE;Registration Address;Country;Site BNPP;Site Country;Site Status;KYC Segment;RIC");
-            writer.newLine();
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(outFile))) {
+            writer.write("CRDSCODE;Registration Address;Country;Site BNPP;Site Country;Site Status;KYC Segment;RIC\n");
 
-            for (MergedEntity entity : mergedEntities) {
-                List<Identifiers> identifiers = entity.getIdentifiers();
-                BusinessAddress address = entity.getBusinessAddress();
-                List<KycSites> sites = entity.getKycSites();
-                List<RiskIndustry> riskIndustries = entity.getRiskIndustries();
+            for (MergedEntity entity : entities) {
+                if (entity.getIdentifiers() == null || entity.getIdentifiers().isEmpty()) continue;
 
-                if (identifiers != null && sites != null && !sites.isEmpty()) {
-                    for (Identifiers id : identifiers) {
-                        String crdsCode = Optional.ofNullable(id.getCrdsCode()).orElse("");
+                Identifiers id = entity.getIdentifiers().get(0);
+                String crdsCode = safe(id.getCrdsCode());
 
-                        String regAddress = (address != null)
-                                ? Stream.of(address.getLine1(), address.getLine2(), address.getCity(),
-                                        address.getState(), address.getZipcode())
-                                       .filter(Objects::nonNull)
-                                       .collect(Collectors.joining(" "))
-                                : "";
+                RegistrationAddress reg = entity.getRegistrationAddress();
+                String regAddress = reg != null
+                        ? Stream.of(reg.getLine1(), reg.getLine2(), reg.getCity(), reg.getState(), reg.getZipCode())
+                                .filter(s -> s != null && !s.isBlank())
+                                .map(this::safe)
+                                .collect(Collectors.joining(" "))
+                        : "";
 
-                        String country = (address != null && address.getCountry() != null)
-                                ? address.getCountry() : "";
+                String regCountry = reg != null ? safe(reg.getCountry()) : "";
 
-                        KycSites site = sites.get(0);
-                        String siteBnpp = Optional.ofNullable(site.getSiteBnpp()).orElse("");
-                        String siteCountry = Optional.ofNullable(site.getCountry()).orElse("");
-                        String siteStatus = Optional.ofNullable(site.getSiteStatus()).orElse("");
+                KycSites site = entity.getKycSites() != null && !entity.getKycSites().isEmpty()
+                        ? entity.getKycSites().get(0) : null;
 
-                        String kycSegment = Optional.ofNullable(entity.getKycSegment()).orElse("");
+                String siteName = site != null ? safe(site.getSiteName()) : "";
+                String siteCountry = site != null ? safe(site.getSiteCountry()) : "";
+                String siteStatus = site != null ? safe(site.getSiteStatus()) : "";
 
-                        String ric = "";
-                        if (riskIndustries != null && !riskIndustries.isEmpty()) {
-                            RiskIndustry ri = riskIndustries.get(0);
-                            ric = (ri.getCode() != null ? ri.getCode() : "") + "-" +
-                                  (ri.getDescription() != null ? ri.getDescription() : "");
-                        }
+                String kycSegment = safe(entity.getKycSegment());
 
-                        writer.write(String.join(";", Arrays.asList(
-                                crdsCode, regAddress, country, siteBnpp,
-                                siteCountry, siteStatus, kycSegment, ric)));
-                        writer.newLine();
-                    }
+                String ric = "";
+                if (entity.getRiskIndustry() != null && !entity.getRiskIndustry().isEmpty()) {
+                    ric = entity.getRiskIndustry().stream()
+                            .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
+                            .collect(Collectors.joining(","));
                 }
+
+                String row = String.join(";", crdsCode, regAddress, regCountry, siteName, siteCountry, siteStatus, kycSegment, ric);
+                writer.write(row + "\n");
             }
 
-            writer.flush();
-            writer.close();
-            log.info("Export completed: {}", file.getAbsolutePath());
+            logger.info("File successfully written to {}", outFile.getAbsolutePath());
 
-        } catch (Exception e) {
-            log.error("Error during export", e);
+        } catch (IOException e) {
+            logger.error("Error writing to file {}", filePath, e);
         }
+    }
+
+    private String safe(String v) {
+        return v == null ? "" : v.trim().replace(";", " ");
     }
 }
