@@ -1,11 +1,12 @@
 package com.bnp.service;
 
+import com.bnp.model.MergedEntity;
+import com.bnp.model.MergedEntityRecord;
 import com.bnp.model.*;
-import com.bnp.repository.MergedEntityRepository;
+import com.bnp.repository.MergedEntityRecordRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,7 +28,7 @@ public class DataService {
 
     private final RestTemplate restTemplate;
     private final ObjectMapper mapper;
-    private final MergedEntityRepository mergedEntityRepository;
+    private final MergedEntityRecordRepository mergedEntityRecordRepository;
 
     @Value("${api.financech.url}")
     private String financeChUrl;
@@ -43,10 +44,11 @@ public class DataService {
 
     private String token;
 
-    public DataService(RestTemplate restTemplate, MergedEntityRepository mergedEntityRepository) {
+    public DataService(RestTemplate restTemplate, 
+                      MergedEntityRecordRepository mergedEntityRecordRepository) {
         this.restTemplate = restTemplate;
         this.mapper = new ObjectMapper();
-        this.mergedEntityRepository = mergedEntityRepository;
+        this.mergedEntityRecordRepository = mergedEntityRecordRepository;
     }
 
     private void fetchAuthToken() {
@@ -81,7 +83,7 @@ public class DataService {
         JsonNode financeResults = fetchJson(financeChUrl).path("results");
         logger.info("Finance results count: {}", financeResults.size());
 
-        List<com.bnp.model.MergedEntity> dbEntities = StreamSupport.stream(financeResults.spliterator(), false)
+        List<MergedEntityRecord> dbEntities = StreamSupport.stream(financeResults.spliterator(), false)
                 .map(r -> r.path("entity"))
                 .filter(e -> e.has("identifiers") && e.path("identifiers").has("ptyId"))
                 .map(this::mergeForSinglePtyId)
@@ -90,50 +92,38 @@ public class DataService {
                 .collect(Collectors.toList());
 
         // Clear existing data before saving new batch
-        mergedEntityRepository.deleteAll();
-        mergedEntityRepository.saveAll(dbEntities);
+        mergedEntityRecordRepository.deleteAll();
+        mergedEntityRecordRepository.saveAll(dbEntities);
         logger.info("Saved {} entities to database", dbEntities.size());
     }
 
-    private com.bnp.model.MergedEntity convertToDbEntity(MergedEntity mergedEntity) {
+    private MergedEntityRecord convertToDbEntity(MergedEntity mergedEntity) {
         Identifiers id = mergedEntity.getIdentifiers().get(0);
         String crdsCode = safe(id.getCrdsCode());
 
         RegistrationAddress reg = mergedEntity.getRegistrationAddress();
-        String regAddress = reg != null
-                ? Stream.of(reg.getLine1(), reg.getLine2(), reg.getCity(), reg.getState(), reg.getZipCode())
-                    .filter(s -> s != null && !s.isBlank())
-                    .map(this::safe)
-                    .collect(Collectors.joining(" "))
+        String regAddress = (reg != null) ? 
+            Stream.of(reg.getLine1(), reg.getLine2(), reg.getCity(), reg.getState(), reg.getZipCode())
+                .filter(s -> s != null && !s.isBlank())
+                .map(this::safe)
+                .collect(Collectors.joining(" "))
                 : "";
 
         String regCountry = reg != null ? safe(reg.getCountry()) : "";
 
-        KycSites site = mergedEntity.getKycSites() != null && !mergedEntity.getKycSites().isEmpty()
-                ? mergedEntity.getKycSites().get(0) : null;
+        KycSites site = mergedEntity.getKycSites().isEmpty() ? null : mergedEntity.getKycSites().get(0);
 
-        String siteName = site != null ? safe(site.getSiteName()) : "";
-        String siteCountry = site != null ? safe(site.getSiteCountry()) : "";
-        String siteStatus = site != null ? safe(site.getSiteStatus()) : "";
-
-        String kycSegment = safe(mergedEntity.getKycSegment());
-
-        String ric = "";
-        if (mergedEntity.getRiskIndustry() != null && !mergedEntity.getRiskIndustry().isEmpty()) {
-            ric = mergedEntity.getRiskIndustry().stream()
-                    .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
-                    .collect(Collectors.joining(","));
-        }
-
-        return new com.bnp.model.MergedEntity(
-                crdsCode,
-                regAddress,
-                regCountry,
-                siteName,
-                siteCountry,
-                siteStatus,
-                kycSegment,
-                ric
+        return new MergedEntityRecord(
+            crdsCode,
+            regAddress,
+            regCountry,
+            site != null ? safe(site.getSiteName()) : "",
+            site != null ? safe(site.getSiteCountry()) : "",
+            site != null ? safe(site.getSiteStatus()) : "",
+            safe(mergedEntity.getKycSegment()),
+            mergedEntity.getRiskIndustry().stream()
+                .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
+                .collect(Collectors.joining(","))
         );
     }
 
@@ -183,9 +173,16 @@ public class DataService {
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.add("Accept", "*/*;version=gamma");
-            if (token != null && !token.isBlank()) headers.setBearerAuth(token);
+            if (token != null && !token.isBlank()) {
+                headers.setBearerAuth(token);
+            }
 
-            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(headers), String.class);
+            ResponseEntity<String> response = restTemplate.exchange(
+                url, 
+                HttpMethod.GET, 
+                new HttpEntity<>(headers), 
+                String.class
+            );
 
             if (!response.getStatusCode().is2xxSuccessful()) {
                 logger.error("GET {} returned {}", url, response.getStatusCode());
