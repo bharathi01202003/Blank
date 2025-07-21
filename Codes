@@ -1,43 +1,38 @@
-public void saveMergedEntitiesToH2() {
-    List<MergedEntity> entities = getMergedEntities();
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.stereotype.Service;
+import java.io.InputStream;
+import java.util.List;
 
-    for (MergedEntity entity : entities) {
-        if (entity.getIdentifiers() == null || entity.getIdentifiers().isEmpty()) continue;
+@Service
+public class YourServiceClass {
 
-        Identifiers id = entity.getIdentifiers().get(0);
-        RegistrationAddress reg = entity.getRegistrationAddress();
-        KycSites site = entity.getKycSites() != null && !entity.getKycSites().isEmpty()
-                ? entity.getKycSites().get(0) : null;
+    private final RecordRepository recordRepository; // Your JPA repo
+    private final Logger logger = LoggerFactory.getLogger(YourServiceClass.class);
 
-        String ric = "";
-        if (entity.getRiskIndustry() != null && !entity.getRiskIndustry().isEmpty()) {
-            ric = entity.getRiskIndustry().stream()
-                    .map(ri -> safe(ri.getRiskIndustryCode()) + "-" + safe(ri.getRiskIndustryDescription()))
-                    .collect(Collectors.joining(","));
-        }
-
-        MergedEntityRecord record = MergedEntityRecord.builder()
-                .crdsCode(safe(id.getCrdsCode()))
-                .registrationAddress(reg != null
-                        ? Stream.of(reg.getLine1(), reg.getLine2(), reg.getCity(), reg.getState(), reg.getZipCode())
-                                .filter(s -> s != null && !s.isBlank())
-                                .map(this::safe)
-                                .collect(Collectors.joining(" "))
-                        : "")
-                .country(reg != null ? safe(reg.getCountry()) : "")
-                .siteName(site != null ? safe(site.getSiteName()) : "")
-                .siteCountry(site != null ? safe(site.getSiteCountry()) : "")
-                .siteStatus(site != null ? safe(site.getSiteStatus()) : "")
-                .kycSegment(safe(entity.getKycSegment()))
-                .riskIndustryCodes(ric)
-                .build();
-
-        try {
-            recordRepository.save(record);
-        } catch (Exception e) {
-            logger.error("Failed to save record for crdsCode: {}", id.getCrdsCode(), e);
-        }
+    public YourServiceClass(RecordRepository recordRepository) {
+        this.recordRepository = recordRepository;
     }
 
-    logger.info("All merged entities saved to H2 database.");
+    public void saveMergedRecordsFromFile() {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            InputStream inputStream = new ClassPathResource("merged_entities.json").getInputStream();
+
+            // Directly read as list of MergedEntityRecord (no transformation)
+            List<MergedEntityRecord> records = mapper.readValue(inputStream, new TypeReference<>() {});
+
+            recordRepository.saveAll(records);
+            logger.info("All merged records saved directly to H2 database.");
+        } catch (Exception ex) {
+            logger.error("Failed to load records from file", ex);
+        }
+    }
+}
+
+
+@PostConstruct
+public void init() {
+    saveMergedRecordsFromFile();
 }
