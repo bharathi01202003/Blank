@@ -1,38 +1,42 @@
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.opencsv.bean.CsvToBeanBuilder;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
-import java.io.InputStream;
+
+import java.io.InputStreamReader;
 import java.util.List;
 
 @Service
 public class YourServiceClass {
 
-    private final RecordRepository recordRepository; // Your JPA repo
+    private final RecordRepository recordRepository;
     private final Logger logger = LoggerFactory.getLogger(YourServiceClass.class);
 
     public YourServiceClass(RecordRepository recordRepository) {
         this.recordRepository = recordRepository;
     }
 
-    public void saveMergedRecordsFromFile() {
+    public void saveMergedRecordsFromCSV() {
         try {
-            ObjectMapper mapper = new ObjectMapper();
-            InputStream inputStream = new ClassPathResource("merged_entities.json").getInputStream();
+            InputStreamReader reader = new InputStreamReader(
+                    new ClassPathResource("merged_entities.csv").getInputStream());
 
-            // Directly read as list of MergedEntityRecord (no transformation)
-            List<MergedEntityRecord> records = mapper.readValue(inputStream, new TypeReference<>() {});
+            List<MergedEntityRecord> records = new CsvToBeanBuilder<MergedEntityRecord>(reader)
+                    .withType(MergedEntityRecord.class)
+                    .withIgnoreLeadingWhiteSpace(true)
+                    .build()
+                    .parse();
 
             recordRepository.saveAll(records);
-            logger.info("All merged records saved directly to H2 database.");
+            logger.info("All merged records from CSV saved to H2 database.");
+
         } catch (Exception ex) {
-            logger.error("Failed to load records from file", ex);
+            logger.error("Failed to read or save records from CSV file", ex);
         }
     }
-}
 
-
-@PostConstruct
-public void init() {
-    saveMergedRecordsFromFile();
+    // Optional @PostConstruct
+    // @PostConstruct
+    // public void init() {
+    //     saveMergedRecordsFromCSV();
+    // }
 }
